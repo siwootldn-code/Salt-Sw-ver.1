@@ -28,7 +28,7 @@ from core.hardware_interface import HardwareInterface
 from core.calculator import MaterialCalculator
 from exporters.excel_exporter import ExcelExporter
 from exporters.pdf_exporter import PDFExporter
-from ui.styles import DARK_THEME_QSS
+from ui.styles import HYUNDAI_THEME_QSS
 
 
 class CommunicateBridge(QObject):
@@ -45,7 +45,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Salt Sw ver.1 — Universal Testing Machine (UTM)")
         self.resize(1280, 850)
-        self.setStyleSheet(DARK_THEME_QSS)
+        self.setStyleSheet(HYUNDAI_THEME_QSS)
 
         # 데이터 저장소 및 하드웨어
         self.data_points: List[DataPoint] = []
@@ -95,9 +95,9 @@ class MainWindow(QMainWindow):
 
         # 브랜드 헤더
         brand_label = QLabel("SALT SW VER.1")
-        brand_label.setStyleSheet("font-size: 16pt; font-weight: bold; color: #38BDF8; letter-spacing: 1px;")
+        brand_label.setStyleSheet("font-size: 16pt; font-weight: 800; color: #0047BA; letter-spacing: 0.5px;")
         sub_label = QLabel("Universal Testing Machine Control System")
-        sub_label.setStyleSheet("font-size: 9pt; color: #64748B; margin-bottom: 4px;")
+        sub_label.setStyleSheet("font-size: 9pt; color: #6B7684; margin-bottom: 4px;")
         layout.addWidget(brand_label)
         layout.addWidget(sub_label)
 
@@ -308,19 +308,20 @@ class MainWindow(QMainWindow):
         graph_box_layout.addLayout(graph_ctrl_layout)
 
         if HAS_PYQTGRAPH:
-            pg.setConfigOption('background', '#0B0F19')
-            pg.setConfigOption('foreground', '#94A3B8')
+            pg.setConfigOption('background', '#FFFFFF')
+            pg.setConfigOption('foreground', '#334155')
             pg.setConfigOptions(antialias=True)
             self.plot_widget = pg.PlotWidget()
+            self.plot_widget.setBackground('#FFFFFF')
             self.plot_widget.showGrid(x=True, y=True, alpha=0.3)
             self.plot_widget.setLabel('bottom', 'Strain (%)')
             self.plot_widget.setLabel('left', 'Stress (MPa)')
-            self.plot_curve = self.plot_widget.plot(pen=pg.mkPen(color='#38BDF8', width=2))
+            self.plot_curve = self.plot_widget.plot(pen=pg.mkPen(color='#0047BA', width=2.5))
             graph_box_layout.addWidget(self.plot_widget)
         else:
             self.plot_widget = QLabel("PyQtGraph 라이브러리가 설치되면 고속 실시간 그래프가 활성화됩니다.")
             self.plot_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.plot_widget.setStyleSheet("background-color: #0B0F19; border: 1px solid #334155; border-radius: 6px;")
+            self.plot_widget.setStyleSheet("background-color: #FFFFFF; border: 1px solid #E5E8EB; border-radius: 8px; color: #64748B;")
             graph_box_layout.addWidget(self.plot_widget)
 
         layout.addWidget(graph_box, stretch=3)

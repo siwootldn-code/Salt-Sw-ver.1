@@ -1,157 +1,243 @@
 """
-Salt Sw ver.1 - Modern Industrial Dark Theme
-산업용 계측기 및 정밀 시험 소프트웨어에 최적화된 고시인성 다크 테마
+Salt Sw ver.1 - Hyundai Marine Style Light Theme (현대해상 스타일 클린 테마)
+현대해상 어플리케이션 특유의 신뢰감 있고 직관적인 화이트 & 하이 블루(Hi-Blue) 디자인
+- 배경: 깨끗하고 부드러운 오프화이트 (#F3F5F8)
+- 카드/컨테이너: 라운드 코너 순백색 카드 (#FFFFFF, Border-Radius: 12px)
+- 브랜드 컬러: 현대해상 시그니처 블루 (#0047BA, #002C6C) & 하이 포인트 오렌지 (#FF5722)
+- 텍스트: 높은 가독성의 딥 차콜 (#191F28) 및 소프트 슬레이트 (#64748B)
 """
 
-DARK_THEME_QSS = """
+HYUNDAI_THEME_QSS = """
 QMainWindow {
-    background-color: #0F172A;
+    background-color: #F3F5F8;
 }
 
 QWidget {
-    background-color: #0F172A;
-    color: #F8FAFC;
-    font-family: 'Segoe UI', '맑은 고딕', sans-serif;
+    background-color: #F3F5F8;
+    color: #191F28;
+    font-family: 'Pretendard', '맑은 고딕', 'Segoe UI', sans-serif;
     font-size: 10pt;
 }
 
-/* 그룹 박스 */
+/* 현대해상 스타일 카드형 그룹 박스 */
 QGroupBox {
-    border: 1px solid #334155;
-    border-radius: 8px;
+    border: 1px solid #E5E8EB;
+    border-radius: 12px;
     margin-top: 18px;
-    padding-top: 14px;
-    background-color: #1E293B;
+    padding: 18px 12px 12px 12px;
+    background-color: #FFFFFF;
     font-weight: bold;
-    color: #94A3B8;
+    color: #002C6C;
 }
 
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 12px;
-    padding: 0 6px;
-    color: #38BDF8;
+    left: 14px;
+    padding: 2px 8px;
+    color: #0047BA;
+    background-color: #EBF3FE;
+    border-radius: 6px;
+    font-size: 9.5pt;
+    font-weight: bold;
 }
 
-/* 입력 위젯 */
+/* 입력 필드 (화이트 & 블루 포커스) */
 QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {
-    background-color: #0F172A;
-    border: 1px solid #475569;
-    border-radius: 5px;
+    background-color: #FFFFFF;
+    border: 1px solid #D1D5DB;
+    border-radius: 8px;
     padding: 6px 10px;
-    color: #F8FAFC;
-    selection-background-color: #0284C7;
+    color: #191F28;
+    selection-background-color: #0047BA;
+    selection-color: #FFFFFF;
+    font-size: 9.5pt;
 }
 
 QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {
-    border: 1px solid #38BDF8;
+    border: 2px solid #0047BA;
+    background-color: #FFFFFF;
 }
 
 QComboBox::drop-down {
     border: none;
-    padding-right: 8px;
+    padding-right: 10px;
 }
 
-/* 버튼 스타일 */
+QComboBox QAbstractItemView {
+    background-color: #FFFFFF;
+    border: 1px solid #E5E8EB;
+    border-radius: 8px;
+    selection-background-color: #EBF3FE;
+    selection-color: #0047BA;
+    padding: 4px;
+}
+
+/* 라디오 버튼 */
+QRadioButton {
+    background-color: transparent;
+    color: #333D4B;
+    font-weight: 500;
+    spacing: 8px;
+}
+
+QRadioButton::indicator {
+    width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    border: 2px solid #D1D5DB;
+    background-color: #FFFFFF;
+}
+
+QRadioButton::indicator:checked {
+    border: 5px solid #0047BA;
+    background-color: #FFFFFF;
+}
+
+/* 일반 버튼 (모던 플랫 화이트) */
 QPushButton {
-    background-color: #334155;
-    border: 1px solid #475569;
-    border-radius: 6px;
-    padding: 8px 16px;
-    font-weight: bold;
-    color: #F8FAFC;
+    background-color: #FFFFFF;
+    border: 1px solid #D1D5DB;
+    border-radius: 8px;
+    padding: 7px 14px;
+    font-weight: 600;
+    color: #333D4B;
 }
 
 QPushButton:hover {
-    background-color: #475569;
+    background-color: #F8FAFC;
+    border-color: #94A3B8;
 }
 
 QPushButton:pressed {
-    background-color: #1E293B;
+    background-color: #E2E8F0;
 }
 
-/* 주요 제어 버튼 특수 색상 */
-QPushButton#btn_start {
-    background-color: #059669;
-    border: 1px solid #10B981;
-    font-size: 11pt;
-}
-QPushButton#btn_start:hover {
-    background-color: #10B981;
-}
-
-QPushButton#btn_stop {
-    background-color: #DC2626;
-    border: 1px solid #EF4444;
-    font-size: 11pt;
-}
-QPushButton#btn_stop:hover {
-    background-color: #EF4444;
-}
-
-QPushButton#btn_excel {
-    background-color: #15803D;
-    border: 1px solid #22C55E;
-}
-QPushButton#btn_excel:hover {
-    background-color: #16A34A;
-}
-
-QPushButton#btn_pdf {
-    background-color: #B91C1C;
-    border: 1px solid #F87171;
-}
-QPushButton#btn_pdf:hover {
-    background-color: #DC2626;
-}
-
-/* 대형 디지털 계측값 타일 (LCD Readout Style) */
-QFrame.readout-tile {
-    background-color: #1E293B;
-    border: 1px solid #334155;
-    border-radius: 8px;
-    padding: 8px;
-}
-
-QLabel.readout-label {
-    font-size: 10pt;
-    font-weight: bold;
+QPushButton:disabled {
+    background-color: #F1F5F9;
+    border-color: #E2E8F0;
     color: #94A3B8;
 }
 
-QLabel.readout-value {
-    font-family: 'Consolas', 'Courier New', monospace;
-    font-size: 26pt;
+/* 주요 CTA 버튼 (현대해상 시그니처 컬러) */
+QPushButton#btn_start {
+    background-color: #0047BA;
+    border: none;
+    border-radius: 10px;
+    color: #FFFFFF;
+    font-size: 11pt;
     font-weight: bold;
-    color: #38BDF8;
+    padding: 10px 18px;
+}
+QPushButton#btn_start:hover {
+    background-color: #003893;
+}
+QPushButton#btn_start:pressed {
+    background-color: #002C6C;
+}
+
+/* 비상 정지 버튼 (현대해상 오렌지 레드 포인트) */
+QPushButton#btn_stop {
+    background-color: #FF5722;
+    border: none;
+    border-radius: 10px;
+    color: #FFFFFF;
+    font-size: 11pt;
+    font-weight: bold;
+    padding: 10px 18px;
+}
+QPushButton#btn_stop:hover {
+    background-color: #E64A19;
+}
+QPushButton#btn_stop:pressed {
+    background-color: #BF360C;
+}
+
+/* 데이터 내보내기 버튼 */
+QPushButton#btn_excel {
+    background-color: #059669;
+    border: none;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-weight: bold;
+}
+QPushButton#btn_excel:hover {
+    background-color: #047857;
+}
+
+QPushButton#btn_pdf {
+    background-color: #0047BA;
+    border: none;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-weight: bold;
+}
+QPushButton#btn_pdf:hover {
+    background-color: #003893;
+}
+
+/* 대형 디지털 계측값 타일 (현대해상 카드 UI) */
+QFrame.readout-tile {
+    background-color: #FFFFFF;
+    border: 1px solid #E5E8EB;
+    border-radius: 14px;
+    padding: 10px 14px;
+}
+
+QLabel.readout-label {
+    background-color: transparent;
+    font-size: 9pt;
+    font-weight: 600;
+    color: #6B7684;
+}
+
+QLabel.readout-value {
+    background-color: transparent;
+    font-family: 'Consolas', 'Segoe UI', monospace;
+    font-size: 26pt;
+    font-weight: 800;
+    color: #002C6C;
 }
 
 QLabel.readout-unit {
-    font-size: 11pt;
-    font-weight: bold;
-    color: #64748B;
+    background-color: transparent;
+    font-size: 10.5pt;
+    font-weight: 700;
+    color: #0047BA;
 }
 
 /* 상태 바 */
 QStatusBar {
-    background-color: #0B0F19;
-    color: #94A3B8;
-    border-top: 1px solid #1E293B;
+    background-color: #FFFFFF;
+    color: #64748B;
+    border-top: 1px solid #E5E8EB;
+    padding: 4px 10px;
+    font-size: 9pt;
 }
 
-/* 테이블 위젯 */
+/* 결과 분석 테이블 */
 QTableWidget {
-    background-color: #1E293B;
-    border: 1px solid #334155;
-    border-radius: 6px;
-    gridline-color: #334155;
+    background-color: #FFFFFF;
+    border: 1px solid #E5E8EB;
+    border-radius: 10px;
+    gridline-color: #F1F5F9;
+    color: #191F28;
+    font-size: 9pt;
 }
 
 QHeaderView::section {
-    background-color: #0F172A;
-    color: #94A3B8;
+    background-color: #F8FAFC;
+    color: #475569;
     font-weight: bold;
-    padding: 6px;
-    border: 1px solid #334155;
+    padding: 8px 6px;
+    border: none;
+    border-bottom: 2px solid #E2E8F0;
+}
+
+QTableWidget::item:selected {
+    background-color: #EBF3FE;
+    color: #0047BA;
 }
 """
+
+# 하위 호환성을 위해 DARK_THEME_QSS 변수도 HYUNDAI_THEME_QSS로 매핑
+DARK_THEME_QSS = HYUNDAI_THEME_QSS
