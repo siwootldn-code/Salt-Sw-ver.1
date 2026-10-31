@@ -23,6 +23,8 @@ except ImportError:
 
 from core.models import Specimen, SpecimenType, TestConfig, TestMode, DataPoint, TestResult
 from core.simulator import VirtualUTMSimulator
+from core.serial_driver import SerialUTMDriver
+from core.hardware_interface import HardwareInterface
 from core.calculator import MaterialCalculator
 from exporters.excel_exporter import ExcelExporter
 from exporters.pdf_exporter import PDFExporter
@@ -33,6 +35,7 @@ class CommunicateBridge(QObject):
     """스레드 안전한 실시간 데이터 전송 브리지"""
     data_received = pyqtSignal(DataPoint)
     test_completed = pyqtSignal(str)
+    raw_data_received = pyqtSignal(str)
 
 
 class MainWindow(QMainWindow):
@@ -48,12 +51,20 @@ class MainWindow(QMainWindow):
         self.data_points: List[DataPoint] = []
         self.current_result: Optional[TestResult] = None
         self.simulator = VirtualUTMSimulator()
+        self.serial_driver = SerialUTMDriver()
+        self.active_driver: HardwareInterface = self.simulator
+
         self.bridge = CommunicateBridge()
         self.bridge.data_received.connect(self._on_data_received)
         self.bridge.test_completed.connect(self._on_test_completed)
+        self.bridge.raw_data_received.connect(self._on_raw_data_received)
 
         self.simulator.on_data_received = lambda dp: self.bridge.data_received.emit(dp)
         self.simulator.on_test_completed = lambda reason: self.bridge.test_completed.emit(reason)
+
+        self.serial_driver.on_data_received = lambda dp: self.bridge.data_received.emit(dp)
+        self.serial_driver.on_test_completed = lambda reason: self.bridge.test_completed.emit(reason)
+        self.serial_driver.on_raw_data_received = lambda raw: self.bridge.raw_data_received.emit(raw)
 
         self._init_ui()
 
@@ -89,6 +100,53 @@ class MainWindow(QMainWindow):
         sub_label.setStyleSheet("font-size: 9pt; color: #64748B; margin-bottom: 4px;")
         layout.addWidget(brand_label)
         layout.addWidget(sub_label)
+
+        # 0. 계측 장비 연동 그룹 (Bongshin P2020 / P2014)
+        hw_group = QGroupBox("계측 장비 연동 (Hardware & RS-232)")
+        hw_layout = QGridLayout(hw_group)
+        hw_layout.setSpacing(6)
+
+        hw_layout.addWidget(QLabel("동작 모드:"), 0, 0)
+        self.combo_hw_mode = QComboBox()
+        self.combo_hw_mode.addItems(["가상 시뮬레이터 (Virtual)", "RS-232 실장비 (봉신 P2020/2014)"])
+        self.combo_hw_mode.currentIndexChanged.connect(self._on_hw_mode_changed)
+        hw_layout.addWidget(self.combo_hw_mode, 0, 1, 1, 2)
+
+        hw_layout.addWidget(QLabel("COM 포트:"), 1, 0)
+        self.combo_com_port = QComboBox()
+        self.btn_refresh_ports = QPushButton("🔄")
+        self.btn_refresh_ports.setToolTip("포트 목록 새로고침")
+        self.btn_refresh_ports.setFixedWidth(36)
+        self.btn_refresh_ports.clicked.connect(self._refresh_com_ports)
+        hw_layout.addWidget(self.combo_com_port, 1, 1)
+        hw_layout.addWidget(self.btn_refresh_ports, 1, 2)
+        self._refresh_com_ports()
+
+        hw_layout.addWidget(QLabel("통신 속도:"), 2, 0)
+        self.combo_baud = QComboBox()
+        self.combo_baud.addItems(["115200 (봉신 P2020/2014)", "57600", "38400", "19200", "9600"])
+        hw_layout.addWidget(self.combo_baud, 2, 1, 1, 2)
+
+        self.btn_connect_hw = QPushButton("🔌 장비 연결 (Connect)")
+        self.btn_connect_hw.clicked.connect(self._toggle_hw_connection)
+        hw_layout.addWidget(self.btn_connect_hw, 3, 0, 1, 3)
+
+        # 영점 맞춤(Tare) 버튼
+        h_tare = QHBoxLayout()
+        self.btn_tare_load = QPushButton("0️⃣ 하중 영점")
+        self.btn_tare_load.clicked.connect(self._tare_load)
+        self.btn_tare_disp = QPushButton("0️⃣ 변위 영점")
+        self.btn_tare_disp.clicked.connect(self._tare_disp)
+        h_tare.addWidget(self.btn_tare_load)
+        h_tare.addWidget(self.btn_tare_disp)
+        hw_layout.addLayout(h_tare, 4, 0, 1, 3)
+
+        # 수신 패킷 모니터링 라벨
+        self.lbl_raw_packet = QLabel("수신 패킷: 대기 중")
+        self.lbl_raw_packet.setStyleSheet("font-size: 8pt; color: #94A3B8; background: #0B0F19; padding: 4px; border-radius: 4px;")
+        hw_layout.addWidget(self.lbl_raw_packet, 5, 0, 1, 3)
+
+        layout.addWidget(hw_group)
 
         # A. 시험 모드 선택 그룹
         mode_group = QGroupBox("시험 모드 (Test Mode)")
@@ -353,21 +411,72 @@ class MainWindow(QMainWindow):
         self.btn_pdf.setEnabled(False)
         self.statusBar().showMessage(f"시험 진행 중... [모드: {config.mode.value}, 시편: {specimen.specimen_id}]")
 
-        self.simulator.start_test(specimen, config)
+        self.active_driver.start_test(specimen, config)
 
     def _stop_test(self):
-        self.simulator.stop_test()
+        self.active_driver.stop_test()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.statusBar().showMessage("시험이 사용자에 의해 정지되었습니다.")
 
     def _return_origin(self):
-        self.simulator.return_to_origin()
+        self.active_driver.return_to_origin()
         self.lbl_load_val.setText("0.0")
         self.lbl_disp_val.setText("0.000")
         self.lbl_stress_val.setText("0.0")
         self.lbl_strain_val.setText("0.00")
         self.statusBar().showMessage("크로스헤드가 원점으로 복귀했습니다.")
+
+    def _refresh_com_ports(self):
+        current = self.combo_com_port.currentText()
+        self.combo_com_port.clear()
+        ports = SerialUTMDriver.list_available_ports()
+        self.combo_com_port.addItems(ports)
+        idx = self.combo_com_port.findText(current)
+        if idx >= 0:
+            self.combo_com_port.setCurrentIndex(idx)
+
+    def _on_hw_mode_changed(self, idx: int):
+        if idx == 0:
+            self.active_driver = self.simulator
+            self.statusBar().showMessage("장비 상태: 가상 시뮬레이터 활성화됨")
+        else:
+            self.active_driver = self.serial_driver
+            self.statusBar().showMessage("장비 상태: RS-232 실장비 모드 (봉신 P2020/P2014) 활성화됨")
+
+    def _toggle_hw_connection(self):
+        if not self.serial_driver.is_connected:
+            port = self.combo_com_port.currentText()
+            baud_text = self.combo_baud.currentText().split()[0]
+            baud = int(baud_text)
+            ok = self.serial_driver.connect(port=port, baudrate=baud)
+            if ok:
+                self.btn_connect_hw.setText("🔌 연결 해제 (Disconnect)")
+                self.btn_connect_hw.setStyleSheet("background-color: #EF4444; color: white;")
+                self.combo_hw_mode.setCurrentIndex(1)
+                self.statusBar().showMessage(f"장비 연결 성공: {port} @ {baud} bps")
+                QMessageBox.information(self, "연결 성공", f"봉신 P2020/P2014 인디케이터가 {port} ({baud} bps)에 정상 연결되었습니다.")
+            else:
+                QMessageBox.warning(self, "연결 실패", f"{port} 포트에 연결할 수 없습니다.\n케이블 연결 및 COM 포트 번호를 확인해 주세요.")
+        else:
+            self.serial_driver.disconnect()
+            self.btn_connect_hw.setText("🔌 장비 연결 (Connect)")
+            self.btn_connect_hw.setStyleSheet("")
+            self.lbl_raw_packet.setText("수신 패킷: 대기 중")
+            self.statusBar().showMessage("장비 연결이 해제되었습니다.")
+
+    def _tare_load(self):
+        self.active_driver.tare_load()
+        self.lbl_load_val.setText("0.0")
+        self.statusBar().showMessage("하중 영점(Tare)이 현재 값으로 세팅되었습니다.")
+
+    def _tare_disp(self):
+        self.active_driver.tare_displacement()
+        self.lbl_disp_val.setText("0.000")
+        self.statusBar().showMessage("변위 영점(Tare)이 현재 값으로 세팅되었습니다.")
+
+    def _on_raw_data_received(self, raw: str):
+        self.lbl_raw_packet.setText(f"수신: {raw[:30]}")
 
     def _reset_data(self):
         self.data_points.clear()

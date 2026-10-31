@@ -41,3 +41,11 @@ class HardwareInterface(ABC):
     def return_to_origin(self):
         """크로스헤드 원점 복귀"""
         pass
+
+    def tare_load(self):
+        """하중 영점 맞춤 (Tare)"""
+        pass
+
+    def tare_displacement(self):
+        """변위 영점 맞춤 (Tare)"""
+        pass
