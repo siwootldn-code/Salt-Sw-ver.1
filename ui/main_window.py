@@ -267,7 +267,7 @@ class MainWindow(QMainWindow):
         layout.addStretch()
         return panel
 
-    def _create_right_panel() -> QWidget:
+    def _create_right_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
