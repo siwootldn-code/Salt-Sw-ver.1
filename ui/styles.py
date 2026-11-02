@@ -15,16 +15,47 @@ QMainWindow {
 QWidget {
     background-color: #F3F5F8;
     color: #191F28;
-    font-family: 'Pretendard', '맑은 고딕', 'Segoe UI', sans-serif;
+    font-family: 'Malgun Gothic', '맑은 고딕', 'Pretendard', 'Segoe UI', sans-serif;
     font-size: 10pt;
+}
+
+/* 상단 탭 위젯 (현대해상 스타일 모던 탭) */
+QTabWidget::pane {
+    border: 1px solid #E5E8EB;
+    border-radius: 12px;
+    background-color: #FFFFFF;
+    top: -1px;
+}
+
+QTabBar::tab {
+    background-color: #E2E8F0;
+    color: #475569;
+    font-size: 10.5pt;
+    font-weight: 700;
+    padding: 10px 22px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+    margin-right: 6px;
+    min-height: 22px;
+}
+
+QTabBar::tab:selected {
+    background-color: #0047BA;
+    color: #FFFFFF;
+    font-weight: 800;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #CBD5E1;
+    color: #002C6C;
 }
 
 /* 현대해상 스타일 카드형 그룹 박스 */
 QGroupBox {
     border: 1px solid #E5E8EB;
     border-radius: 12px;
-    margin-top: 18px;
-    padding: 18px 12px 12px 12px;
+    margin-top: 14px;
+    padding: 14px 10px 10px 10px;
     background-color: #FFFFFF;
     font-weight: bold;
     color: #002C6C;
@@ -32,7 +63,7 @@ QGroupBox {
 
 QGroupBox::title {
     subcontrol-origin: margin;
-    left: 14px;
+    left: 12px;
     padding: 2px 8px;
     color: #0047BA;
     background-color: #EBF3FE;
@@ -41,12 +72,40 @@ QGroupBox::title {
     font-weight: bold;
 }
 
+/* 스크롤 영역 (테두리 없이 깔끔하게) */
+QScrollArea {
+    background-color: transparent;
+    border: none;
+}
+
+QScrollBar:vertical {
+    border: none;
+    background: #F1F5F9;
+    width: 8px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical {
+    background: #CBD5E1;
+    min-height: 20px;
+    border-radius: 4px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #94A3B8;
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
 /* 입력 필드 (화이트 & 블루 포커스) */
 QLineEdit, QComboBox, QDoubleSpinBox, QSpinBox {
     background-color: #FFFFFF;
     border: 1px solid #D1D5DB;
     border-radius: 8px;
-    padding: 6px 10px;
+    padding: 4px 8px;
+    min-height: 28px;
     color: #191F28;
     selection-background-color: #0047BA;
     selection-color: #FFFFFF;
@@ -60,7 +119,7 @@ QLineEdit:focus, QComboBox:focus, QDoubleSpinBox:focus {
 
 QComboBox::drop-down {
     border: none;
-    padding-right: 10px;
+    padding-right: 8px;
 }
 
 QComboBox QAbstractItemView {
@@ -78,6 +137,7 @@ QRadioButton {
     color: #333D4B;
     font-weight: 500;
     spacing: 8px;
+    min-height: 24px;
 }
 
 QRadioButton::indicator {
@@ -93,12 +153,41 @@ QRadioButton::indicator:checked {
     background-color: #FFFFFF;
 }
 
+/* 체크박스 (결과 필터용) */
+QCheckBox {
+    background-color: transparent;
+    color: #333D4B;
+    font-size: 9pt;
+    font-weight: 500;
+    spacing: 6px;
+    min-height: 22px;
+}
+
+QCheckBox::indicator {
+    width: 16px;
+    height: 16px;
+    border-radius: 4px;
+    border: 1.5px solid #94A3B8;
+    background-color: #FFFFFF;
+}
+
+QCheckBox::indicator:checked {
+    border: 1.5px solid #0047BA;
+    background-color: #0047BA;
+    image: none;
+}
+
+QCheckBox::indicator:hover {
+    border-color: #0047BA;
+}
+
 /* 일반 버튼 (모던 플랫 화이트) */
 QPushButton {
     background-color: #FFFFFF;
     border: 1px solid #D1D5DB;
     border-radius: 8px;
-    padding: 7px 14px;
+    padding: 6px 12px;
+    min-height: 26px;
     font-weight: 600;
     color: #333D4B;
 }
@@ -126,7 +215,8 @@ QPushButton#btn_start {
     color: #FFFFFF;
     font-size: 11pt;
     font-weight: bold;
-    padding: 10px 18px;
+    padding: 8px 16px;
+    min-height: 32px;
 }
 QPushButton#btn_start:hover {
     background-color: #003893;
@@ -143,7 +233,8 @@ QPushButton#btn_stop {
     color: #FFFFFF;
     font-size: 11pt;
     font-weight: bold;
-    padding: 10px 18px;
+    padding: 8px 16px;
+    min-height: 32px;
 }
 QPushButton#btn_stop:hover {
     background-color: #E64A19;
@@ -159,6 +250,7 @@ QPushButton#btn_excel {
     border-radius: 8px;
     color: #FFFFFF;
     font-weight: bold;
+    min-height: 28px;
 }
 QPushButton#btn_excel:hover {
     background-color: #047857;
@@ -170,6 +262,7 @@ QPushButton#btn_pdf {
     border-radius: 8px;
     color: #FFFFFF;
     font-weight: bold;
+    min-height: 28px;
 }
 QPushButton#btn_pdf:hover {
     background-color: #003893;
@@ -180,7 +273,7 @@ QFrame.readout-tile {
     background-color: #FFFFFF;
     border: 1px solid #E5E8EB;
     border-radius: 14px;
-    padding: 10px 14px;
+    padding: 8px 12px;
 }
 
 QLabel.readout-label {
@@ -193,14 +286,14 @@ QLabel.readout-label {
 QLabel.readout-value {
     background-color: transparent;
     font-family: 'Consolas', 'Segoe UI', monospace;
-    font-size: 26pt;
+    font-size: 24pt;
     font-weight: 800;
     color: #002C6C;
 }
 
 QLabel.readout-unit {
     background-color: transparent;
-    font-size: 10.5pt;
+    font-size: 10pt;
     font-weight: 700;
     color: #0047BA;
 }
@@ -221,16 +314,17 @@ QTableWidget {
     border-radius: 10px;
     gridline-color: #F1F5F9;
     color: #191F28;
-    font-size: 9pt;
+    font-size: 9.5pt;
 }
 
 QHeaderView::section {
     background-color: #F8FAFC;
     color: #475569;
     font-weight: bold;
-    padding: 8px 6px;
+    padding: 6px 4px;
     border: none;
     border-bottom: 2px solid #E2E8F0;
+    font-size: 9pt;
 }
 
 QTableWidget::item:selected {
@@ -239,5 +333,4 @@ QTableWidget::item:selected {
 }
 """
 
-# 하위 호환성을 위해 DARK_THEME_QSS 변수도 HYUNDAI_THEME_QSS로 매핑
 DARK_THEME_QSS = HYUNDAI_THEME_QSS

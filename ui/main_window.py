@@ -12,7 +12,8 @@ from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QDoubleSpinBox,
     QPushButton, QRadioButton, QButtonGroup, QTableWidget,
-    QTableWidgetItem, QFileDialog, QMessageBox, QFrame, QHeaderView
+    QTableWidgetItem, QFileDialog, QMessageBox, QFrame, QHeaderView,
+    QTabWidget, QCheckBox, QScrollArea, QTextEdit
 )
 
 try:
@@ -41,10 +42,23 @@ class CommunicateBridge(QObject):
 class MainWindow(QMainWindow):
     """Salt Sw ver.1 메인 애플리케이션 윈도우"""
 
+    # 결과 테이블 컬럼 정의
+    RESULT_COLUMNS = [
+        ("최대 하중 (Pmax, N)", "최대하중"),
+        ("인장/압축강도 (Rm, MPa)", "인장/압축강도"),
+        ("항복강도 (Rp0.2, MPa)", "항복강도"),
+        ("탄성계수 (E, GPa)", "탄성계수"),
+        ("파단 연신율 (A, %)", "연신율"),
+        ("파단 변위 (dL, mm)", "파단변위"),
+        ("흡수에너지 (U, J)", "흡수에너지"),
+        ("시험 결과 판정", "결과판정")
+    ]
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Salt Sw ver.1 — Universal Testing Machine (UTM)")
-        self.resize(1280, 850)
+        self.resize(1360, 900)
+        self.setMinimumSize(1100, 720)
         self.setStyleSheet(HYUNDAI_THEME_QSS)
 
         # 데이터 저장소 및 하드웨어
@@ -71,84 +85,69 @@ class MainWindow(QMainWindow):
     def _init_ui(self):
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
-        main_layout = QHBoxLayout(main_widget)
-        main_layout.setContentsMargins(14, 14, 14, 14)
-        main_layout.setSpacing(14)
+        root_layout = QVBoxLayout(main_widget)
+        root_layout.setContentsMargins(12, 10, 12, 10)
+        root_layout.setSpacing(8)
 
-        # 1. 좌측 제어 및 설정 패널 (폭 360px)
-        left_panel = self._create_left_panel()
-        main_layout.addWidget(left_panel, stretch=0)
+        # 상단 탭 위젯 생성
+        self.tabs = QTabWidget()
+        root_layout.addWidget(self.tabs)
 
-        # 2. 우측 모니터링 패널 (계측 타일 + 실시간 그래프 + 결과표)
-        right_panel = self._create_right_panel()
-        main_layout.addWidget(right_panel, stretch=1)
+        # 탭 1: 메인 시험 진행 및 모니터링 대시보드
+        tab_dashboard = self._create_dashboard_tab()
+        self.tabs.addTab(tab_dashboard, "📊  시험 제어 및 실시간 모니터링")
+
+        # 탭 2: 계측 장비 연동 및 통신 설정 (RS-232 / 봉신 P2020)
+        tab_hardware = self._create_hardware_tab()
+        self.tabs.addTab(tab_hardware, "🔌  계측 장비 연동 설정 (RS-232 / 봉신)")
 
         # 상태 바
-        self.statusBar().showMessage("장비 상태: 대기 중 (READY) | 가상 계측기 활성화됨")
+        self.statusBar().showMessage("장비 상태: 대기 중 (READY) | 가상 시뮬레이터 동작 중")
+
+    def _create_dashboard_tab(self) -> QWidget:
+        """메인 대시보드 탭 생성 (좌측 제어 + 우측 계측 모니터링)"""
+        tab = QWidget()
+        layout = QHBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(12)
+
+        # 좌측 패널 (스크롤 영역에 감싸 세로 찌그러짐 원천 차단)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFixedWidth(380)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        left_content = self._create_left_panel()
+        left_scroll.setWidget(left_content)
+        layout.addWidget(left_scroll, stretch=0)
+
+        # 우측 패널 (계측 타일 + 그래프 + 필터링 결과표)
+        right_panel = self._create_right_panel()
+        layout.addWidget(right_panel, stretch=1)
+
+        return tab
 
     def _create_left_panel(self) -> QWidget:
+        """좌측 제어 패널: 시편 설정, 조건 설정, 동작 제어, 파일 출력"""
         panel = QWidget()
-        panel.setFixedWidth(360)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(6, 6, 10, 6)
         layout.setSpacing(10)
 
         # 브랜드 헤더
+        brand_box = QFrame()
+        brand_layout = QVBoxLayout(brand_box)
+        brand_layout.setContentsMargins(4, 2, 4, 4)
+        brand_layout.setSpacing(2)
         brand_label = QLabel("SALT SW VER.1")
         brand_label.setStyleSheet("font-size: 16pt; font-weight: 800; color: #0047BA; letter-spacing: 0.5px;")
         sub_label = QLabel("Universal Testing Machine Control System")
-        sub_label.setStyleSheet("font-size: 9pt; color: #6B7684; margin-bottom: 4px;")
-        layout.addWidget(brand_label)
-        layout.addWidget(sub_label)
+        sub_label.setStyleSheet("font-size: 8.5pt; color: #64748B;")
+        brand_layout.addWidget(brand_label)
+        brand_layout.addWidget(sub_label)
+        layout.addWidget(brand_box)
 
-        # 0. 계측 장비 연동 그룹 (Bongshin P2020 / P2014)
-        hw_group = QGroupBox("계측 장비 연동 (Hardware & RS-232)")
-        hw_layout = QGridLayout(hw_group)
-        hw_layout.setSpacing(6)
-
-        hw_layout.addWidget(QLabel("동작 모드:"), 0, 0)
-        self.combo_hw_mode = QComboBox()
-        self.combo_hw_mode.addItems(["가상 시뮬레이터 (Virtual)", "RS-232 실장비 (봉신 P2020/2014)"])
-        self.combo_hw_mode.currentIndexChanged.connect(self._on_hw_mode_changed)
-        hw_layout.addWidget(self.combo_hw_mode, 0, 1, 1, 2)
-
-        hw_layout.addWidget(QLabel("COM 포트:"), 1, 0)
-        self.combo_com_port = QComboBox()
-        self.btn_refresh_ports = QPushButton("🔄")
-        self.btn_refresh_ports.setToolTip("포트 목록 새로고침")
-        self.btn_refresh_ports.setFixedWidth(36)
-        self.btn_refresh_ports.clicked.connect(self._refresh_com_ports)
-        hw_layout.addWidget(self.combo_com_port, 1, 1)
-        hw_layout.addWidget(self.btn_refresh_ports, 1, 2)
-        self._refresh_com_ports()
-
-        hw_layout.addWidget(QLabel("통신 속도:"), 2, 0)
-        self.combo_baud = QComboBox()
-        self.combo_baud.addItems(["115200 (봉신 P2020/2014)", "57600", "38400", "19200", "9600"])
-        hw_layout.addWidget(self.combo_baud, 2, 1, 1, 2)
-
-        self.btn_connect_hw = QPushButton("🔌 장비 연결 (Connect)")
-        self.btn_connect_hw.clicked.connect(self._toggle_hw_connection)
-        hw_layout.addWidget(self.btn_connect_hw, 3, 0, 1, 3)
-
-        # 영점 맞춤(Tare) 버튼
-        h_tare = QHBoxLayout()
-        self.btn_tare_load = QPushButton("0️⃣ 하중 영점")
-        self.btn_tare_load.clicked.connect(self._tare_load)
-        self.btn_tare_disp = QPushButton("0️⃣ 변위 영점")
-        self.btn_tare_disp.clicked.connect(self._tare_disp)
-        h_tare.addWidget(self.btn_tare_load)
-        h_tare.addWidget(self.btn_tare_disp)
-        hw_layout.addLayout(h_tare, 4, 0, 1, 3)
-
-        # 수신 패킷 모니터링 라벨
-        self.lbl_raw_packet = QLabel("수신 패킷: 대기 중")
-        self.lbl_raw_packet.setStyleSheet("font-size: 8pt; color: #94A3B8; background: #0B0F19; padding: 4px; border-radius: 4px;")
-        hw_layout.addWidget(self.lbl_raw_packet, 5, 0, 1, 3)
-
-        layout.addWidget(hw_group)
-
-        # A. 시험 모드 선택 그룹
+        # A. 시험 모드 선택
         mode_group = QGroupBox("시험 모드 (Test Mode)")
         mode_layout = QHBoxLayout(mode_group)
         self.rb_tensile = QRadioButton("인장 시험 (Tensile)")
@@ -161,7 +160,7 @@ class MainWindow(QMainWindow):
         mode_layout.addWidget(self.rb_compression)
         layout.addWidget(mode_group)
 
-        # B. 시편 제원 설정 그룹
+        # B. 시편 제원 설정
         spec_group = QGroupBox("시편 제원 설정 (Specimen)")
         spec_layout = QGridLayout(spec_group)
         spec_layout.setSpacing(8)
@@ -202,9 +201,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(spec_group)
 
-        # C. 시험 조건 설정 그룹
+        # C. 시험 조건 설정
         cond_group = QGroupBox("시험 조건 (Test Conditions)")
         cond_layout = QGridLayout(cond_group)
+        cond_layout.setSpacing(8)
 
         cond_layout.addWidget(QLabel("시험 속도 (mm/min):"), 0, 0)
         self.spin_speed = QDoubleSpinBox()
@@ -250,6 +250,7 @@ class MainWindow(QMainWindow):
         # E. 데이터 내보내기 그룹 (엑셀 / PDF)
         export_group = QGroupBox("데이터 저장 및 리포트 (Export)")
         export_layout = QVBoxLayout(export_group)
+        export_layout.setSpacing(8)
 
         self.btn_excel = QPushButton("📊  엑셀 데이터 저장 (.xlsx)")
         self.btn_excel.setObjectName("btn_excel")
@@ -268,6 +269,7 @@ class MainWindow(QMainWindow):
         return panel
 
     def _create_right_panel(self) -> QWidget:
+        """우측 패널: 대형 디지털 타일, 실시간 그래프, 필터링 결과 테이블"""
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -326,23 +328,149 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(graph_box, stretch=3)
 
-        # 3. 하단 시험 결과 요약 테이블
+        # 3. 하단 시험 결과 요약 테이블 + 사용자 맞춤 체크박스 필터링 바
         res_box = QGroupBox("주요 기계적 물성 분석 결과 (Test Results)")
         res_layout = QVBoxLayout(res_box)
+        res_layout.setSpacing(6)
+
+        # 체크박스 필터 바
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(10)
+        lbl_filter_title = QLabel("⚙️ 표시 항목 선택:")
+        lbl_filter_title.setStyleSheet("font-weight: 700; color: #0047BA; font-size: 9pt;")
+        filter_layout.addWidget(lbl_filter_title)
+
+        self.col_checkboxes: List[QCheckBox] = []
+        for col_idx, (full_title, short_title) in enumerate(self.RESULT_COLUMNS):
+            cb = QCheckBox(short_title)
+            cb.setChecked(True)
+            cb.setToolTip(full_title)
+            # 클로저 바인딩
+            cb.toggled.connect(lambda checked, idx=col_idx: self._toggle_column_visibility(idx, checked))
+            self.col_checkboxes.append(cb)
+            filter_layout.addWidget(cb)
+
+        btn_select_all = QPushButton("전체")
+        btn_select_all.setFixedWidth(50)
+        btn_select_all.clicked.connect(self._select_all_columns)
+        filter_layout.addWidget(btn_select_all)
+        filter_layout.addStretch()
+
+        res_layout.addLayout(filter_layout)
+
+        # 결과 테이블
         self.table_results = QTableWidget()
-        self.table_results.setColumnCount(8)
-        self.table_results.setHorizontalHeaderLabels([
-            "최대 하중 (Pmax, N)", "인장/압축강도 (Rm, MPa)", "항복강도 (Rp0.2, MPa)",
-            "탄성계수 (E, GPa)", "파단 연신율 (A, %)", "파단 변위 (dL, mm)",
-            "흡수에너지 (U, J)", "시험 결과 판정"
-        ])
+        self.table_results.setColumnCount(len(self.RESULT_COLUMNS))
+        self.table_results.setHorizontalHeaderLabels([col[0] for col in self.RESULT_COLUMNS])
         self.table_results.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table_results.setRowCount(1)
+        self.table_results.setFixedHeight(75)
         self._clear_results_table()
         res_layout.addWidget(self.table_results)
-        layout.addWidget(res_box, stretch=1)
 
+        layout.addWidget(res_box, stretch=1)
         return panel
+
+    def _create_hardware_tab(self) -> QWidget:
+        """상단 탭 2: 계측 장비 연동 및 통신 설정 전용 화면"""
+        tab = QWidget()
+        main_layout = QVBoxLayout(tab)
+        main_layout.setContentsMargins(18, 14, 18, 14)
+        main_layout.setSpacing(14)
+
+        # 1. 상단 통신 설정 카드
+        settings_group = QGroupBox("RS-232 시리얼 통신 및 장비 설정 (Bongshin Loadcell & Indicator)")
+        settings_layout = QGridLayout(settings_group)
+        settings_layout.setContentsMargins(16, 18, 16, 16)
+        settings_layout.setSpacing(12)
+
+        settings_layout.addWidget(QLabel("동작 모드:"), 0, 0)
+        self.combo_hw_mode = QComboBox()
+        self.combo_hw_mode.addItems(["가상 시뮬레이터 (Virtual Simulator)", "RS-232 실장비 (봉신 P2020 / P2014)"])
+        self.combo_hw_mode.currentIndexChanged.connect(self._on_hw_mode_changed)
+        settings_layout.addWidget(self.combo_hw_mode, 0, 1, 1, 2)
+
+        settings_layout.addWidget(QLabel("COM 포트 (COM Port):"), 1, 0)
+        self.combo_com_port = QComboBox()
+        self.btn_refresh_ports = QPushButton("🔄 포트 새로고침")
+        self.btn_refresh_ports.setFixedWidth(120)
+        self.btn_refresh_ports.clicked.connect(self._refresh_com_ports)
+        settings_layout.addWidget(self.combo_com_port, 1, 1)
+        settings_layout.addWidget(self.btn_refresh_ports, 1, 2)
+        self._refresh_com_ports()
+
+        settings_layout.addWidget(QLabel("통신 속도 (Baudrate):"), 2, 0)
+        self.combo_baud = QComboBox()
+        self.combo_baud.addItems(["115200 (봉신 P2020/2014 표준)", "57600", "38400", "19200", "9600"])
+        settings_layout.addWidget(self.combo_baud, 2, 1, 1, 2)
+
+        settings_layout.addWidget(QLabel("통신 규격 (Format):"), 3, 0)
+        lbl_format = QLabel("Data 8 Bit / Parity None / Stop 1 Bit (8-N-1)")
+        lbl_format.setStyleSheet("color: #475569; font-weight: 600;")
+        settings_layout.addWidget(lbl_format, 3, 1, 1, 2)
+
+        # 연결 버튼 및 상태 인디케이터
+        h_conn = QHBoxLayout()
+        self.btn_connect_hw = QPushButton("🔌  장비 연결 (Connect)")
+        self.btn_connect_hw.setStyleSheet("background-color: #0047BA; color: #FFFFFF; font-size: 11pt; font-weight: bold; min-height: 34px;")
+        self.btn_connect_hw.clicked.connect(self._toggle_hw_connection)
+        
+        self.lbl_hw_status = QLabel("● 장비 미연결 (가상 시뮬레이터 모드)")
+        self.lbl_hw_status.setStyleSheet("color: #64748B; font-weight: 700; font-size: 10pt; margin-left: 12px;")
+        h_conn.addWidget(self.btn_connect_hw, stretch=1)
+        h_conn.addWidget(self.lbl_hw_status, stretch=2)
+        settings_layout.addLayout(h_conn, 4, 0, 1, 3)
+
+        main_layout.addWidget(settings_group)
+
+        # 2. 영점 맞춤(Tare) 제어 카드
+        tare_group = QGroupBox("장비 영점 보정 (Zero / Tare)")
+        tare_layout = QHBoxLayout(tare_group)
+        tare_layout.setContentsMargins(16, 16, 16, 16)
+        tare_layout.setSpacing(14)
+
+        self.btn_tare_load = QPushButton("0️⃣  하중 영점 맞춤 (Tare Load)")
+        self.btn_tare_load.setMinimumHeight(34)
+        self.btn_tare_load.clicked.connect(self._tare_load)
+
+        self.btn_tare_disp = QPushButton("0️⃣  변위 영점 맞춤 (Tare Disp)")
+        self.btn_tare_disp.setMinimumHeight(34)
+        self.btn_tare_disp.clicked.connect(self._tare_disp)
+
+        lbl_tare_desc = QLabel("※ 시험 시작 전 현재 하중과 변위를 0.00으로 보정합니다.")
+        lbl_tare_desc.setStyleSheet("color: #64748B; font-size: 9pt;")
+
+        tare_layout.addWidget(self.btn_tare_load)
+        tare_layout.addWidget(self.btn_tare_disp)
+        tare_layout.addWidget(lbl_tare_desc)
+        tare_layout.addStretch()
+
+        main_layout.addWidget(tare_group)
+
+        # 3. 실시간 통신 패킷 수신 모니터 카드
+        mon_group = QGroupBox("실시간 RS-232 통신 데이터 패킷 모니터링 (Raw Packet Monitor)")
+        mon_layout = QVBoxLayout(mon_group)
+        mon_layout.setContentsMargins(16, 16, 16, 16)
+        mon_layout.setSpacing(8)
+
+        self.txt_packet_log = QTextEdit()
+        self.txt_packet_log.setReadOnly(True)
+        self.txt_packet_log.setStyleSheet(
+            "background-color: #0F172A; color: #38BDF8; font-family: 'Consolas', monospace; font-size: 9.5pt; border-radius: 8px; padding: 10px;"
+        )
+        self.txt_packet_log.setPlaceholderText("장비가 연결되면 수신되는 원시 데이터 스트림(ASCII/Hex)이 여기에 표시됩니다...")
+        mon_layout.addWidget(self.txt_packet_log)
+
+        h_mon_ctrl = QHBoxLayout()
+        self.btn_clear_log = QPushButton("로그 지우기")
+        self.btn_clear_log.setFixedWidth(100)
+        self.btn_clear_log.clicked.connect(lambda: self.txt_packet_log.clear())
+        h_mon_ctrl.addWidget(self.btn_clear_log)
+        h_mon_ctrl.addStretch()
+        mon_layout.addLayout(h_mon_ctrl)
+
+        main_layout.addWidget(mon_group, stretch=1)
+        return tab
 
     def _create_tile(self, label_text: str, default_val: str, unit_text: str):
         tile = QFrame()
@@ -351,39 +479,45 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(10, 8, 10, 8)
         layout.setSpacing(2)
 
-        lbl = QLabel(label_text)
-        lbl.setProperty("class", "readout-label")
-        val = QLabel(default_val)
-        val.setProperty("class", "readout-value")
-        val.setAlignment(Qt.AlignmentFlag.AlignRight)
-        unit = QLabel(unit_text)
-        unit.setProperty("class", "readout-unit")
-        unit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        lbl_title = QLabel(label_text)
+        lbl_title.setProperty("class", "readout-label")
+        layout.addWidget(lbl_title)
 
-        layout.addWidget(lbl)
-        layout.addWidget(val)
-        layout.addWidget(unit)
-        return tile, val
+        lbl_val = QLabel(default_val)
+        lbl_val.setProperty("class", "readout-value")
+        lbl_val.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(lbl_val)
+
+        lbl_unit = QLabel(unit_text)
+        lbl_unit.setProperty("class", "readout-unit")
+        lbl_unit.setAlignment(Qt.AlignmentFlag.AlignRight)
+        layout.addWidget(lbl_unit)
+
+        return tile, lbl_val
+
+    def _toggle_column_visibility(self, col_idx: int, visible: bool):
+        """체크박스 토글에 따라 결과 테이블 컬럼 표시/숨김"""
+        self.table_results.setColumnHidden(col_idx, not visible)
+
+    def _select_all_columns(self):
+        """결과 테이블 전체 컬럼 선택"""
+        for cb in self.col_checkboxes:
+            cb.setChecked(True)
 
     def _on_specimen_type_changed(self, index: int):
-        if index == 1:  # Round
-            self.lbl_width.setText("직경 (Dia, mm):")
-            self.lbl_thick.setEnabled(False)
-            self.spin_thick.setEnabled(False)
-        else:
-            self.lbl_width.setText("폭 (Width, mm):")
-            self.lbl_thick.setEnabled(True)
-            self.spin_thick.setEnabled(True)
+        is_flat = (index == 0)
+        self.lbl_width.setText("폭 (Width, mm):" if is_flat else "직경 (Dia, mm):")
+        self.lbl_thick.setVisible(is_flat)
+        self.spin_thick.setVisible(is_flat)
 
     def _get_current_specimen(self) -> Specimen:
-        spec_type = SpecimenType.ROUND if self.combo_type.currentIndex() == 1 else SpecimenType.FLAT
+        stype = SpecimenType.FLAT if self.combo_type.currentIndex() == 0 else SpecimenType.ROUND
         return Specimen(
-            specimen_id=self.edit_specimen_id.text().strip() or "SPECIMEN-001",
-            material=self.edit_material.text().strip() or "SS400",
-            specimen_type=spec_type,
-            width_mm=self.spin_width.value(),
-            thickness_mm=self.spin_thick.value(),
-            diameter_mm=self.spin_width.value(),
+            specimen_id=self.edit_specimen_id.text().strip(),
+            material_name=self.edit_material.text().strip(),
+            specimen_type=stype,
+            width_or_diameter_mm=self.spin_width.value(),
+            thickness_mm=self.spin_thick.value() if stype == SpecimenType.FLAT else None,
             gauge_length_mm=self.spin_l0.value()
         )
 
@@ -410,7 +544,9 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(True)
         self.btn_excel.setEnabled(False)
         self.btn_pdf.setEnabled(False)
-        self.statusBar().showMessage(f"시험 진행 중... [모드: {config.mode.value}, 시편: {specimen.specimen_id}]")
+
+        mode_str = "인장 시험" if config.mode == TestMode.TENSILE else "압축 시험"
+        self.statusBar().showMessage(f"시험 진행 중... [모드: {mode_str}, 시편: {specimen.specimen_id}]")
 
         self.active_driver.start_test(specimen, config)
 
@@ -418,10 +554,9 @@ class MainWindow(QMainWindow):
         self.active_driver.stop_test()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
-        self.statusBar().showMessage("시험이 사용자에 의해 정지되었습니다.")
+        self.statusBar().showMessage("시험이 사용자에 의해 중단되었습니다.")
 
     def _return_origin(self):
-        self.active_driver.return_to_origin()
         self.lbl_load_val.setText("0.0")
         self.lbl_disp_val.setText("0.000")
         self.lbl_stress_val.setText("0.0")
@@ -429,55 +564,74 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("크로스헤드가 원점으로 복귀했습니다.")
 
     def _refresh_com_ports(self):
-        current = self.combo_com_port.currentText()
         self.combo_com_port.clear()
         ports = SerialUTMDriver.list_available_ports()
-        self.combo_com_port.addItems(ports)
-        idx = self.combo_com_port.findText(current)
-        if idx >= 0:
-            self.combo_com_port.setCurrentIndex(idx)
+        if ports:
+            for p, desc in ports:
+                self.combo_com_port.addItem(f"{p} ({desc})", p)
+        else:
+            self.combo_com_port.addItem("검색된 COM 포트 없음", "")
 
     def _on_hw_mode_changed(self, idx: int):
         if idx == 0:
             self.active_driver = self.simulator
-            self.statusBar().showMessage("장비 상태: 가상 시뮬레이터 활성화됨")
+            self.lbl_hw_status.setText("● 가상 시뮬레이터 동작 중")
+            self.lbl_hw_status.setStyleSheet("color: #0047BA; font-weight: 700; font-size: 10pt; margin-left: 12px;")
+            self.statusBar().showMessage("동작 모드: 가상 물리 시뮬레이터 (Virtual)")
         else:
             self.active_driver = self.serial_driver
-            self.statusBar().showMessage("장비 상태: RS-232 실장비 모드 (봉신 P2020/P2014) 활성화됨")
+            self.lbl_hw_status.setText("● 실장비 모드 (연결 대기)")
+            self.lbl_hw_status.setStyleSheet("color: #EA580C; font-weight: 700; font-size: 10pt; margin-left: 12px;")
+            self.statusBar().showMessage("동작 모드: RS-232 실장비 (봉신 P2020/P2014)")
 
     def _toggle_hw_connection(self):
         if not self.serial_driver.is_connected:
-            port = self.combo_com_port.currentText()
-            baud_text = self.combo_baud.currentText().split()[0]
-            baud = int(baud_text)
+            port = self.combo_com_port.currentData()
+            if not port:
+                QMessageBox.warning(self, "포트 선택 필요", "연결할 COM 포트를 선택해 주세요.\n(포트 새로고침 버튼을 눌러보세요)")
+                return
+            baud_str = self.combo_baud.currentText().split()[0]
+            baud = int(baud_str)
             ok = self.serial_driver.connect(port=port, baudrate=baud)
             if ok:
-                self.btn_connect_hw.setText("🔌 연결 해제 (Disconnect)")
-                self.btn_connect_hw.setStyleSheet("background-color: #EF4444; color: white;")
-                self.combo_hw_mode.setCurrentIndex(1)
-                self.statusBar().showMessage(f"장비 연결 성공: {port} @ {baud} bps")
-                QMessageBox.information(self, "연결 성공", f"봉신 P2020/P2014 인디케이터가 {port} ({baud} bps)에 정상 연결되었습니다.")
+                self.btn_connect_hw.setText("🔌  장비 연결 해제 (Disconnect)")
+                self.btn_connect_hw.setStyleSheet("background-color: #E11D48; color: #FFFFFF; font-size: 11pt; font-weight: bold; min-height: 34px;")
+                self.lbl_hw_status.setText(f"● 정상 연결됨 ({port} @ {baud} bps)")
+                self.lbl_hw_status.setStyleSheet("color: #16A34A; font-weight: 700; font-size: 10pt; margin-left: 12px;")
+                self.statusBar().showMessage(f"장비 연결 성공: {port} (봉신 P2020 / {baud} bps)")
             else:
-                QMessageBox.warning(self, "연결 실패", f"{port} 포트에 연결할 수 없습니다.\n케이블 연결 및 COM 포트 번호를 확인해 주세요.")
+                QMessageBox.critical(self, "연결 실패", f"{port} 포트에 연결할 수 없습니다.\n케이블 결선 및 전원을 확인해 주세요.")
         else:
             self.serial_driver.disconnect()
-            self.btn_connect_hw.setText("🔌 장비 연결 (Connect)")
-            self.btn_connect_hw.setStyleSheet("")
-            self.lbl_raw_packet.setText("수신 패킷: 대기 중")
+            self.btn_connect_hw.setText("🔌  장비 연결 (Connect)")
+            self.btn_connect_hw.setStyleSheet("background-color: #0047BA; color: #FFFFFF; font-size: 11pt; font-weight: bold; min-height: 34px;")
+            self.lbl_hw_status.setText("● 연결 해제됨")
+            self.lbl_hw_status.setStyleSheet("color: #64748B; font-weight: 700; font-size: 10pt; margin-left: 12px;")
             self.statusBar().showMessage("장비 연결이 해제되었습니다.")
 
     def _tare_load(self):
-        self.active_driver.tare_load()
+        self.serial_driver.tare_load()
         self.lbl_load_val.setText("0.0")
-        self.statusBar().showMessage("하중 영점(Tare)이 현재 값으로 세팅되었습니다.")
+        self.lbl_stress_val.setText("0.0")
+        self.statusBar().showMessage("하중 영점(Tare Load)이 현재 값으로 보정되었습니다.")
 
     def _tare_disp(self):
-        self.active_driver.tare_displacement()
+        self.serial_driver.tare_displacement()
         self.lbl_disp_val.setText("0.000")
-        self.statusBar().showMessage("변위 영점(Tare)이 현재 값으로 세팅되었습니다.")
+        self.lbl_strain_val.setText("0.00")
+        self.statusBar().showMessage("변위 영점(Tare Disp)이 현재 값으로 보정되었습니다.")
 
     def _on_raw_data_received(self, raw: str):
-        self.lbl_raw_packet.setText(f"수신: {raw[:30]}")
+        # 탭 2 로그 창에 타임스탬프와 함께 출력
+        now_str = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        self.txt_packet_log.append(f"[{now_str}] {raw.strip()}")
+        # 너무 길어지면 위쪽 줄 정리 (최대 100줄)
+        if self.txt_packet_log.document().lineCount() > 100:
+            cursor = self.txt_packet_log.textCursor()
+            cursor.movePosition(cursor.MoveOperation.Start)
+            cursor.select(cursor.SelectionType.LineUnderCursor)
+            cursor.removeSelectedText()
+            cursor.deleteChar()
 
     def _reset_data(self):
         self.data_points.clear()
@@ -499,15 +653,9 @@ class MainWindow(QMainWindow):
         self.lbl_stress_val.setText(f"{point.stress_mpa:.1f}")
         self.lbl_strain_val.setText(f"{point.strain_pct:.2f}")
 
-        # 실시간 그래프 업데이트 (5개 샘플마다 갱신하여 렌더링 최적화)
+        # 실시간 곡선 플로팅 (성능 최적화: 2점마다 렌더링)
         if HAS_PYQTGRAPH and len(self.data_points) % 2 == 0:
-            if self.rb_graph_ss.isChecked():
-                xs = [p.strain_pct for p in self.data_points]
-                ys = [p.stress_mpa for p in self.data_points]
-            else:
-                xs = [p.displacement_mm for p in self.data_points]
-                ys = [p.load_n for p in self.data_points]
-            self.plot_curve.setData(xs, ys)
+            self._replot_graph()
 
     def _on_test_completed(self, reason: str):
         self.btn_start.setEnabled(True)
@@ -542,7 +690,7 @@ class MainWindow(QMainWindow):
         self.plot_curve.setData(xs, ys)
 
     def _clear_results_table(self):
-        for col in range(8):
+        for col in range(len(self.RESULT_COLUMNS)):
             self.table_results.setItem(0, col, QTableWidgetItem("-"))
             if self.table_results.item(0, col):
                 self.table_results.item(0, col).setTextAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -558,41 +706,41 @@ class MainWindow(QMainWindow):
             f"{res.energy_joule:.2f}",
             "파단 완료" if res.is_fractured else "시험 종료"
         ]
-        for col, v in enumerate(vals):
-            item = QTableWidgetItem(v)
+        for col, val in enumerate(vals):
+            item = QTableWidgetItem(val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_results.setItem(0, col, item)
 
     def _export_excel(self):
-        if not self.data_points or not self.current_result:
-            QMessageBox.warning(self, "저장 불가", "내보낼 시험 데이터가 없습니다.")
+        if not self.current_result or not self.data_points:
+            QMessageBox.warning(self, "경고", "내보낼 시험 결과 데이터가 없습니다.")
             return
 
-        filename = f"Salt_UTM_Report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        filepath, _ = QFileDialog.getSaveFileName(self, "엑셀 파일로 저장", filename, "Excel Files (*.xlsx)")
+        specimen = self._get_current_specimen()
+        config = self._get_current_config()
+        default_filename = f"UTM_{specimen.specimen_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "엑셀 시험 데이터 저장", default_filename, "Excel Files (*.xlsx)"
+        )
         if filepath:
-            try:
-                ExcelExporter.export(
-                    filepath, self._get_current_specimen(),
-                    self._get_current_config(), self.current_result, self.data_points
-                )
-                QMessageBox.information(self, "저장 완료", f"엑셀 파일이 성공적으로 저장되었습니다:\n{filepath}")
-            except Exception as e:
-                QMessageBox.critical(self, "저장 실패", f"엑셀 저장 중 오류가 발생했습니다:\n{str(e)}")
+            ExcelExporter.export(specimen, config, self.data_points, self.current_result, filepath)
+            QMessageBox.information(self, "저장 완료", f"성공적으로 저장되었습니다:\n{filepath}")
+            self.statusBar().showMessage(f"엑셀 저장 완료: {filepath}")
 
     def _export_pdf(self):
-        if not self.data_points or not self.current_result:
-            QMessageBox.warning(self, "저장 불가", "내보낼 시험 데이터가 없습니다.")
+        if not self.current_result or not self.data_points:
+            QMessageBox.warning(self, "경고", "내보낼 시험 결과 데이터가 없습니다.")
             return
 
-        filename = f"Salt_UTM_Certificate_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-        filepath, _ = QFileDialog.getSaveFileName(self, "시험 성적서 PDF 저장", filename, "PDF Files (*.pdf)")
+        specimen = self._get_current_specimen()
+        config = self._get_current_config()
+        default_filename = f"Certificate_{specimen.specimen_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+        filepath, _ = QFileDialog.getSaveFileName(
+            self, "PDF 시험 성적서 출력", default_filename, "PDF Files (*.pdf)"
+        )
         if filepath:
-            try:
-                PDFExporter.export(
-                    filepath, self._get_current_specimen(),
-                    self._get_current_config(), self.current_result, self.data_points
-                )
-                QMessageBox.information(self, "저장 완료", f"시험 성적서 PDF가 성공적으로 저장되었습니다:\n{filepath}")
-            except Exception as e:
-                QMessageBox.critical(self, "저장 실패", f"PDF 저장 중 오류가 발생했습니다:\n{str(e)}")
+            PDFExporter.export(specimen, config, self.data_points, self.current_result, filepath)
+            QMessageBox.information(self, "출력 완료", f"공식 시험 성적서가 생성되었습니다:\n{filepath}")
+            self.statusBar().showMessage(f"PDF 성적서 출력 완료: {filepath}")
