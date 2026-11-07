@@ -447,7 +447,65 @@ class MainWindow(QMainWindow):
 
         main_layout.addWidget(tare_group)
 
-        # 3. 실시간 통신 패킷 수신 모니터 카드
+        # 3. 장비 정밀 교정 카드 (로드셀 2점 교정 및 크로스헤드 속도 교정)
+        calib_group = QGroupBox("🎯 장비 정밀 교정 (Load Cell & Speed Calibration)")
+        calib_layout = QVBoxLayout(calib_group)
+        calib_layout.setContentsMargins(16, 16, 16, 16)
+        calib_layout.setSpacing(12)
+
+        # 3-A. 로드셀 2점 교정 (하중 Zero & Span)
+        box_load_calib = QGroupBox("1) 봉신 로드셀 2점 교정 (Zero & Span)")
+        grid_load = QGridLayout(box_load_calib)
+        grid_load.setSpacing(10)
+
+        grid_load.addWidget(QLabel("① 영점 교정:"), 0, 0)
+        self.btn_calib_zero = QPushButton("0️⃣  현재 상태를 무부하 영점(Zero)으로 설정")
+        self.btn_calib_zero.clicked.connect(self._do_calib_zero)
+        grid_load.addWidget(self.btn_calib_zero, 0, 1, 1, 2)
+
+        grid_load.addWidget(QLabel("② 스팬 교정:"), 1, 0)
+        self.edit_ref_load = QLineEdit("1000.0")
+        self.edit_ref_load.setPlaceholderText("기준 하중값")
+        self.combo_ref_unit = QComboBox()
+        self.combo_ref_unit.addItems(["kgf", "kN", "N"])
+        self.btn_calib_span = QPushButton("⚖️  기준 하중 인가 후 스팬 교정 실행")
+        self.btn_calib_span.setStyleSheet("background-color: #0047BA; color: white; font-weight: bold;")
+        self.btn_calib_span.clicked.connect(self._do_calib_span)
+        grid_load.addWidget(self.edit_ref_load, 1, 1)
+        grid_load.addWidget(self.combo_ref_unit, 1, 2)
+        grid_load.addWidget(self.btn_calib_span, 1, 3)
+
+        self.lbl_load_factor = QLabel(f"현재 하중 보정 계수: {self.serial_driver.calib_mgr.data.load_scale_factor:.5f} (최근: {self.serial_driver.calib_mgr.data.last_load_calib_date})")
+        self.lbl_load_factor.setStyleSheet("color: #0369A1; font-weight: 600; font-size: 9pt;")
+        grid_load.addWidget(self.lbl_load_factor, 2, 0, 1, 4)
+        calib_layout.addWidget(box_load_calib)
+
+        # 3-B. 크로스헤드 속도 교정 (Speed Scale Factor)
+        box_speed_calib = QGroupBox("2) 크로스헤드 이송 속도 교정 (Speed Calibration)")
+        grid_speed = QGridLayout(box_speed_calib)
+        grid_speed.setSpacing(10)
+
+        grid_speed.addWidget(QLabel("목표 속도 (mm/min):"), 0, 0)
+        self.edit_target_speed = QLineEdit("50.0")
+        grid_speed.addWidget(self.edit_target_speed, 0, 1)
+
+        grid_speed.addWidget(QLabel("1분간 실측 이동거리 (mm):"), 0, 2)
+        self.edit_measured_dist = QLineEdit("48.5")
+        grid_speed.addWidget(self.edit_measured_dist, 0, 3)
+
+        self.btn_calib_speed = QPushButton("⏱️  속도 보정 계수 자동 계산 및 적용")
+        self.btn_calib_speed.setStyleSheet("background-color: #0284C7; color: white; font-weight: bold;")
+        self.btn_calib_speed.clicked.connect(self._do_calib_speed)
+        grid_speed.addWidget(self.btn_calib_speed, 0, 4)
+
+        self.lbl_speed_factor = QLabel(f"현재 속도 보정 계수: {self.serial_driver.calib_mgr.data.speed_scale_factor:.5f} (최근: {self.serial_driver.calib_mgr.data.last_speed_calib_date})")
+        self.lbl_speed_factor.setStyleSheet("color: #0369A1; font-weight: 600; font-size: 9pt;")
+        grid_speed.addWidget(self.lbl_speed_factor, 1, 0, 1, 5)
+        calib_layout.addWidget(box_speed_calib)
+
+        main_layout.addWidget(calib_group)
+
+        # 4. 실시간 통신 패킷 수신 모니터 카드
         mon_group = QGroupBox("실시간 RS-232 통신 데이터 패킷 모니터링 (Raw Packet Monitor)")
         mon_layout = QVBoxLayout(mon_group)
         mon_layout.setContentsMargins(16, 16, 16, 16)
@@ -620,6 +678,35 @@ class MainWindow(QMainWindow):
         self.lbl_disp_val.setText("0.000")
         self.lbl_strain_val.setText("0.00")
         self.statusBar().showMessage("변위 영점(Tare Disp)이 현재 값으로 보정되었습니다.")
+
+    def _do_calib_zero(self):
+        self.serial_driver.tare_load()
+        offset = self.serial_driver.calib_mgr.data.load_zero_offset
+        factor = self.serial_driver.calib_mgr.data.load_scale_factor
+        self.lbl_load_factor.setText(f"현재 하중 보정 계수: {factor:.5f} (영점 오프셋: {offset:.2f})")
+        QMessageBox.information(self, "영점 교정 완료", f"현재 센서값({offset:.2f})이 무부하 영점(Zero)으로 설정되었습니다.")
+
+    def _do_calib_span(self):
+        try:
+            ref_val = float(self.edit_ref_load.text())
+            unit = self.combo_ref_unit.currentText()
+            factor = self.serial_driver.calibrate_load_span(ref_val, unit)
+            last_date = self.serial_driver.calib_mgr.data.last_load_calib_date
+            self.lbl_load_factor.setText(f"현재 하중 보정 계수: {factor:.5f} (최근: {last_date})")
+            QMessageBox.information(self, "스팬 교정 완료", f"기준 하중 {ref_val} {unit}에 대한 스팬 교정이 완료되었습니다!\n계산된 보정 계수: {factor:.5f}\n(calib_config.json에 영구 저장됨)")
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "올바른 기준 하중 숫자를 입력해 주세요.")
+
+    def _do_calib_speed(self):
+        try:
+            target_sp = float(self.edit_target_speed.text())
+            dist = float(self.edit_measured_dist.text())
+            factor = self.serial_driver.calibrate_speed(target_sp, dist, duration_sec=60.0)
+            last_date = self.serial_driver.calib_mgr.data.last_speed_calib_date
+            self.lbl_speed_factor.setText(f"현재 속도 보정 계수: {factor:.5f} (최근: {last_date})")
+            QMessageBox.information(self, "속도 교정 완료", f"목표 속도 {target_sp} mm/min 대비 실측 {dist} mm 기준 속도 교정이 완료되었습니다!\n계산된 보정 계수: {factor:.5f}\n(calib_config.json에 영구 저장됨)")
+        except ValueError:
+            QMessageBox.warning(self, "입력 오류", "올바른 속도 및 이동거리 숫자를 입력해 주세요.")
 
     def _on_raw_data_received(self, raw: str):
         # 탭 2 로그 창에 타임스탬프와 함께 출력

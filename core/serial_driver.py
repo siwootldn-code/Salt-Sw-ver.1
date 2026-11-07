@@ -19,6 +19,7 @@ except ImportError:
 
 from .hardware_interface import HardwareInterface
 from .models import DataPoint, TestConfig, Specimen
+from .calibration import CalibrationManager
 
 
 class SerialUTMDriver(HardwareInterface):
@@ -46,6 +47,7 @@ class SerialUTMDriver(HardwareInterface):
         self.start_time: float = 0.0
         
         # 보정 계수 및 영점 (Zero/Tare)
+        self.calib_mgr = CalibrationManager()
         self.load_tare: float = 0.0
         self.disp_tare: float = 0.0
         self.last_raw_load: float = 0.0
@@ -138,13 +140,53 @@ class SerialUTMDriver(HardwareInterface):
 
     def tare_load(self):
         """현재 하중을 0으로 세팅 (Zero/Tare)"""
-        self.load_tare = self.last_raw_load
-        print(f"[SerialUTMDriver] 하중 영점 세팅 완료: Tare = {self.load_tare}")
+        self.calib_mgr.data.load_zero_offset = self.last_raw_load
+        self.calib_mgr.save()
+        self.load_tare = 0.0
+        print(f"[SerialUTMDriver] 하중 영점 세팅 완료: Zero Offset = {self.calib_mgr.data.load_zero_offset}")
 
     def tare_displacement(self):
         """현재 변위를 0으로 세팅"""
-        self.disp_tare = self.last_raw_disp
-        print(f"[SerialUTMDriver] 변위 영점 세팅 완료: Tare = {self.disp_tare}")
+        self.calib_mgr.data.disp_zero_offset = self.last_raw_disp
+        self.calib_mgr.save()
+        self.disp_tare = 0.0
+        print(f"[SerialUTMDriver] 변위 영점 세팅 완료: Zero Offset = {self.calib_mgr.data.disp_zero_offset}")
+
+    def calibrate_load_span(self, ref_load_val: float, unit: str = "kgf") -> float:
+        """
+        기준 하중(분동/기준기) 인가 상태에서 스팬 교정 계수(Span Factor) 산출 및 영구 저장
+        """
+        if unit == "kgf":
+            ref_n = ref_load_val * 9.80665
+        elif unit == "kN":
+            ref_n = ref_load_val * 1000.0
+        else:
+            ref_n = ref_load_val
+
+        # 현재 수신 중인 순수 센서 하중 (오프셋 뺀 값)
+        current_raw_delta = (self.last_raw_load - self.calib_mgr.data.load_zero_offset) * self.load_unit_multiplier
+        if abs(current_raw_delta) > 0.001:
+            factor = ref_n / current_raw_delta
+            self.calib_mgr.data.load_scale_factor = round(factor, 6)
+            from datetime import datetime
+            self.calib_mgr.data.last_load_calib_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.calib_mgr.save()
+            return self.calib_mgr.data.load_scale_factor
+        return 1.0
+
+    def calibrate_speed(self, target_speed_mm_min: float, measured_dist_mm: float, duration_sec: float = 60.0) -> float:
+        """
+        목표 속도로 duration_sec 동안 구동 후 실측 이동 거리 기반 속도 보정 계수 산출 및 영구 저장
+        """
+        actual_speed = (measured_dist_mm / duration_sec) * 60.0
+        if actual_speed > 0.001:
+            factor = target_speed_mm_min / actual_speed
+            self.calib_mgr.data.speed_scale_factor = round(factor, 6)
+            from datetime import datetime
+            self.calib_mgr.data.last_speed_calib_date = datetime.now().strftime("%Y-%m-%d %H:%M")
+            self.calib_mgr.save()
+            return self.calib_mgr.data.speed_scale_factor
+        return 1.0
 
     def send_command(self, cmd: str):
         """시리얼 명령 전송"""
@@ -200,9 +242,12 @@ class SerialUTMDriver(HardwareInterface):
             self.last_raw_load = raw_load
             self.last_raw_disp = raw_disp
 
-            # 영점(Tare) 및 단위 변환 적용 (최종 단위: N 및 mm)
-            load_n = (raw_load - self.load_tare) * self.load_unit_multiplier
-            disp_mm = (raw_disp - self.disp_tare) * self.disp_unit_multiplier
+            # 영점(Tare) 및 캘리브레이션 보정 적용 (최종 단위: N 및 mm)
+            corrected_raw_load = self.calib_mgr.apply_load(raw_load)
+            load_n = (corrected_raw_load - self.load_tare) * self.load_unit_multiplier
+
+            corrected_raw_disp = self.calib_mgr.apply_disp(raw_disp)
+            disp_mm = (corrected_raw_disp - self.disp_tare) * self.disp_unit_multiplier
 
             # 하중이 kN 단위로 들어오는 경우 자동 판정
             # 봉신 인디케이터 기본 설정에 맞춤
