@@ -22,7 +22,7 @@ try:
 except ImportError:
     HAS_PYQTGRAPH = False
 
-from core.models import Specimen, SpecimenType, TestConfig, TestMode, DataPoint, TestResult
+from core.models import Specimen, SpecimenType, TestConfig, TestMode, BendingType, HoldingType, DataPoint, TestResult
 from core.simulator import VirtualUTMSimulator
 from core.serial_driver import SerialUTMDriver
 from core.hardware_interface import HardwareInterface
@@ -147,17 +147,27 @@ class MainWindow(QMainWindow):
         brand_layout.addWidget(sub_label)
         layout.addWidget(brand_box)
 
-        # A. 시험 모드 선택
-        mode_group = QGroupBox("시험 모드 (Test Mode)")
-        mode_layout = QHBoxLayout(mode_group)
-        self.rb_tensile = QRadioButton("인장 시험 (Tensile)")
-        self.rb_compression = QRadioButton("압축 시험 (Compression)")
+        # A. 시험 모드 선택 (4대 시험 모드)
+        mode_group = QGroupBox("시험 모드 선택 (Test Mode)")
+        mode_layout = QGridLayout(mode_group)
+        mode_layout.setSpacing(6)
+        self.rb_tensile = QRadioButton("인장 (Tensile)")
+        self.rb_compression = QRadioButton("압축 (Compression)")
+        self.rb_bending = QRadioButton("굽힘 (Bending)")
+        self.rb_holding = QRadioButton("유지 (Holding)")
         self.rb_tensile.setChecked(True)
+
         self.mode_btn_group = QButtonGroup()
-        self.mode_btn_group.addButton(self.rb_tensile)
-        self.mode_btn_group.addButton(self.rb_compression)
-        mode_layout.addWidget(self.rb_tensile)
-        mode_layout.addWidget(self.rb_compression)
+        self.mode_btn_group.addButton(self.rb_tensile, 0)
+        self.mode_btn_group.addButton(self.rb_compression, 1)
+        self.mode_btn_group.addButton(self.rb_bending, 2)
+        self.mode_btn_group.addButton(self.rb_holding, 3)
+        self.mode_btn_group.idToggled.connect(self._on_test_mode_toggled)
+
+        mode_layout.addWidget(self.rb_tensile, 0, 0)
+        mode_layout.addWidget(self.rb_compression, 0, 1)
+        mode_layout.addWidget(self.rb_bending, 1, 0)
+        mode_layout.addWidget(self.rb_holding, 1, 1)
         layout.addWidget(mode_group)
 
         # B. 시편 제원 설정
@@ -201,9 +211,9 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(spec_group)
 
-        # C. 시험 조건 설정
-        cond_group = QGroupBox("시험 조건 (Test Conditions)")
-        cond_layout = QGridLayout(cond_group)
+        # C. 시험 조건 설정 (동적 모드 연동)
+        self.cond_group = QGroupBox("시험 조건 설정 (Test Conditions)")
+        cond_layout = QGridLayout(self.cond_group)
         cond_layout.setSpacing(8)
 
         cond_layout.addWidget(QLabel("시험 속도 (mm/min):"), 0, 0)
@@ -212,13 +222,63 @@ class MainWindow(QMainWindow):
         self.spin_speed.setValue(5.0)
         cond_layout.addWidget(self.spin_speed, 0, 1)
 
-        cond_layout.addWidget(QLabel("파단 감지 드롭 (%):"), 1, 0)
+        # 파단 감지 드롭 (인장/압축/굽힘)
+        self.lbl_drop = QLabel("파단 감지 드롭 (%):")
         self.spin_drop = QDoubleSpinBox()
         self.spin_drop.setRange(10.0, 95.0)
         self.spin_drop.setValue(50.0)
+        cond_layout.addWidget(self.lbl_drop, 1, 0)
         cond_layout.addWidget(self.spin_drop, 1, 1)
 
-        layout.addWidget(cond_group)
+        # 굽힘 시험 전용: 굽힘 방식 & 지간 거리 (L)
+        self.lbl_bend_type = QLabel("굽힘 지그 방식:")
+        self.combo_bend_type = QComboBox()
+        self.combo_bend_type.addItems(["3점 굽힘 (3-Point)", "4점 굽힘 (4-Point)"])
+        cond_layout.addWidget(self.lbl_bend_type, 2, 0)
+        cond_layout.addWidget(self.combo_bend_type, 2, 1)
+
+        self.lbl_span = QLabel("지간 거리 (Span L, mm):")
+        self.spin_span = QDoubleSpinBox()
+        self.spin_span.setRange(5.0, 2000.0)
+        self.spin_span.setValue(100.0)
+        cond_layout.addWidget(self.lbl_span, 3, 0)
+        cond_layout.addWidget(self.spin_span, 3, 1)
+
+        # 유지 시험 전용: 유지 방식 & 목표 유지값 & 유지 시간
+        self.lbl_hold_type = QLabel("유지 제어 방식:")
+        self.combo_hold_type = QComboBox()
+        self.combo_hold_type.addItems(["하중 유지 (Load Hold / Creep)", "변위 유지 (Disp Hold / Relax)"])
+        cond_layout.addWidget(self.lbl_hold_type, 4, 0)
+        cond_layout.addWidget(self.combo_hold_type, 4, 1)
+
+        self.lbl_hold_val = QLabel("목표 유지값 (N / mm):")
+        self.spin_hold_val = QDoubleSpinBox()
+        self.spin_hold_val.setRange(0.1, 100000.0)
+        self.spin_hold_val.setValue(1000.0)
+        cond_layout.addWidget(self.lbl_hold_val, 5, 0)
+        cond_layout.addWidget(self.spin_hold_val, 5, 1)
+
+        self.lbl_hold_dur = QLabel("유지 시간 (초, sec):")
+        self.spin_hold_dur = QDoubleSpinBox()
+        self.spin_hold_dur.setRange(1.0, 86400.0)
+        self.spin_hold_dur.setValue(60.0)
+        cond_layout.addWidget(self.lbl_hold_dur, 6, 0)
+        cond_layout.addWidget(self.spin_hold_dur, 6, 1)
+
+        # 초기 상태 숨김
+        self.lbl_bend_type.setVisible(False)
+        self.combo_bend_type.setVisible(False)
+        self.lbl_span.setVisible(False)
+        self.spin_span.setVisible(False)
+
+        self.lbl_hold_type.setVisible(False)
+        self.combo_hold_type.setVisible(False)
+        self.lbl_hold_val.setVisible(False)
+        self.spin_hold_val.setVisible(False)
+        self.lbl_hold_dur.setVisible(False)
+        self.spin_hold_dur.setVisible(False)
+
+        layout.addWidget(self.cond_group)
 
         # D. 장비 조작 버튼
         ctrl_group = QGroupBox("시험기 제어 (Operation)")
@@ -562,6 +622,33 @@ class MainWindow(QMainWindow):
         for cb in self.col_checkboxes:
             cb.setChecked(True)
 
+    def _on_test_mode_toggled(self, btn_id: int, checked: bool):
+        if not checked:
+            return
+        is_bend = (btn_id == 2)
+        is_hold = (btn_id == 3)
+
+        # 파단 감지 드롭 (유지 시험 제외)
+        self.lbl_drop.setVisible(not is_hold)
+        self.spin_drop.setVisible(not is_hold)
+
+        # 굽힘 필드 토글
+        self.lbl_bend_type.setVisible(is_bend)
+        self.combo_bend_type.setVisible(is_bend)
+        self.lbl_span.setVisible(is_bend)
+        self.spin_span.setVisible(is_bend)
+
+        # 유지 필드 토글
+        self.lbl_hold_type.setVisible(is_hold)
+        self.combo_hold_type.setVisible(is_hold)
+        self.lbl_hold_val.setVisible(is_hold)
+        self.spin_hold_val.setVisible(is_hold)
+        self.lbl_hold_dur.setVisible(is_hold)
+        self.spin_hold_dur.setVisible(is_hold)
+
+        modes = ["인장 시험 (Tensile)", "압축 시험 (Compression)", "굽힘 시험 (Bending)", "유지 시험 (Holding)"]
+        self.statusBar().showMessage(f"시험 모드 선택됨: {modes[btn_id]}")
+
     def _on_specimen_type_changed(self, index: int):
         is_flat = (index == 0)
         self.lbl_width.setText("폭 (Width, mm):" if is_flat else "직경 (Dia, mm):")
@@ -580,13 +667,29 @@ class MainWindow(QMainWindow):
         )
 
     def _get_current_config(self) -> TestConfig:
-        mode = TestMode.TENSILE if self.rb_tensile.isChecked() else TestMode.COMPRESSION
+        if self.rb_tensile.isChecked():
+            mode = TestMode.TENSILE
+        elif self.rb_compression.isChecked():
+            mode = TestMode.COMPRESSION
+        elif self.rb_bending.isChecked():
+            mode = TestMode.BENDING
+        else:
+            mode = TestMode.HOLDING
+
+        btype = BendingType.THREE_POINT if self.combo_bend_type.currentIndex() == 0 else BendingType.FOUR_POINT
+        htype = HoldingType.LOAD_HOLD if self.combo_hold_type.currentIndex() == 0 else HoldingType.DISP_HOLD
+
         return TestConfig(
             mode=mode,
             test_speed_mm_min=self.spin_speed.value(),
             fracture_drop_ratio=self.spin_drop.value() / 100.0,
             max_displacement_mm=50.0,
-            sampling_rate_hz=20
+            sampling_rate_hz=20,
+            bending_type=btype,
+            span_length_mm=self.spin_span.value(),
+            holding_type=htype,
+            target_holding_val=self.spin_hold_val.value(),
+            holding_duration_s=self.spin_hold_dur.value()
         )
 
     def _start_test(self):
@@ -603,7 +706,13 @@ class MainWindow(QMainWindow):
         self.btn_excel.setEnabled(False)
         self.btn_pdf.setEnabled(False)
 
-        mode_str = "인장 시험" if config.mode == TestMode.TENSILE else "압축 시험"
+        mode_names = {
+            TestMode.TENSILE: "인장 시험 (Tensile)",
+            TestMode.COMPRESSION: "압축 시험 (Compression)",
+            TestMode.BENDING: "굽힘 시험 (Bending)",
+            TestMode.HOLDING: "유지 시험 (Holding)"
+        }
+        mode_str = mode_names.get(config.mode, "재료 시험")
         self.statusBar().showMessage(f"시험 진행 중... [모드: {mode_str}, 시편: {specimen.specimen_id}]")
 
         self.active_driver.start_test(specimen, config)
