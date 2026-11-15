@@ -749,14 +749,14 @@ class MainWindow(QMainWindow):
         self.table_batch.verticalHeader().setVisible(False)
         self.table_batch.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table_batch.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.table_batch.setColumnWidth(0, 88)
+        self.table_batch.setColumnWidth(0, 108)
         self.table_batch.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table_batch.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         self.table_batch.setWordWrap(False)
         self.table_batch.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.table_batch.verticalHeader().setDefaultSectionSize(21)
         self.table_batch.setFixedHeight(146)
-        self.table_batch.setStyleSheet("QTableWidget { font-size: 8.5pt; }")
+        self.table_batch.setStyleSheet("QTableWidget { font-size: 8pt; }")
         for row, (key, _unit, _dec) in enumerate(BATCH_METRICS):
             item = QTableWidgetItem(metric_label(key, "KO"))
             item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
@@ -1300,6 +1300,7 @@ class MainWindow(QMainWindow):
         super().resizeEvent(event)
         self._adjust_wrapped_labels()
         self._sync_scroll_min_heights()
+        self._fit_batch_metric_column()
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -1789,15 +1790,18 @@ class MainWindow(QMainWindow):
             )
             self.plot_widget.addItem(line)
             self._step_markers.append(line)
-            # 오른쪽 끝에 붙는 단계는 라벨을 왼쪽으로 붙여 잘리지 않게 한다
-            anchor = (-1, 0) if (x_max > 0 and x > x_max * 0.92) else (0, 0)
+            # 오른쪽 끝에 붙는 단계는 라벨을 왼쪽으로 붙이고, 나머지는 선에서 살짝 띄운다
+            if x_max > 0 and x > x_max * 0.92:
+                anchor, offset = (1, 0), -x_max * 0.006
+            else:
+                anchor, offset = (0, 0), x_max * 0.006
             label = pg.TextItem(
                 html=f'<span style="font-size:7pt; color:#475569;">S{int(ev.get("index", 0)) + 1}</span>',
                 anchor=anchor,
             )
             # 단계 시작점이 가까우면 라벨이 겹치므로 계단식으로 높이를 달리 둔다
             stagger = 0.045 * (int(ev.get("index", 0)) % 4)
-            label.setPos(x, top * (0.03 + stagger))
+            label.setPos(x + offset, top * (0.03 + stagger))
             self.plot_widget.addItem(label)
             self._step_markers.append(label)
 
@@ -1943,10 +1947,20 @@ class MainWindow(QMainWindow):
         self._refresh_session_table()
         self._replot_graph()
 
+    def _fit_batch_metric_column(self):
+        """창 폭에 맞춰 물성 열 너비를 조정 (좁은 창에서도 숫자가 잘리지 않게)"""
+        if not hasattr(self, "table_batch"):
+            return
+        width = self.table_batch.viewport().width()
+        target = 108 if width >= 470 else (88 if width >= 390 else 70)
+        if self.table_batch.columnWidth(0) != target:
+            self.table_batch.setColumnWidth(0, target)
+
     def _refresh_batch_table(self):
         """선택(보기) 시편들로 배치 통계 표 갱신"""
         if not hasattr(self, "table_batch"):
             return
+        self._fit_batch_metric_column()
         lang = self.current_lang
         t = TRANSLATIONS[lang]
         stats = self.session.statistics()
