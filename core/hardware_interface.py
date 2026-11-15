@@ -4,8 +4,9 @@ Salt Sw ver.1 - Hardware Interface Base Class
 """
 
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 from .models import DataPoint, ExtensometerSettings, TestConfig, Specimen
+from .sequence import SequenceProgram
 
 
 class HardwareInterface(ABC):
@@ -16,6 +17,9 @@ class HardwareInterface(ABC):
         self.is_running: bool = False
         self.on_data_received: Optional[Callable[[DataPoint], None]] = None
         self.on_test_completed: Optional[Callable[[str], None]] = None
+        # 다단계 시퀀스 실행 기록 (시험 종료 후 결과/그래프에 표시)
+        self.step_events: List[dict] = []
+        self.sequence_name: str = ""
 
     @abstractmethod
     def connect(self, port: str = "COM1", baudrate: int = 115200) -> bool:
@@ -57,3 +61,7 @@ class HardwareInterface(ABC):
     def set_extensometer(self, settings: Optional[ExtensometerSettings]):
         """신율계 설정 적용 (환경 설정 값) - 지원하지 않는 드라이버는 무시"""
         pass
+
+    def current_sequence_status(self) -> str:
+        """진행 중인 시퀀스 단계 표시 문자열 (미지원 드라이버는 빈 문자열)"""
+        return ""

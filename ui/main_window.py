@@ -7,23 +7,45 @@ Salt Sw ver.1 - Main Dashboard Window
 """
 
 import os
+import re
 from datetime import datetime
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject, QRect
+from PyQt6.QtGui import QColor, QBrush, QFont
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QLineEdit, QComboBox, QDoubleSpinBox,
     QPushButton, QRadioButton, QButtonGroup, QTableWidget,
     QTableWidgetItem, QFileDialog, QMessageBox, QFrame, QHeaderView,
-    QTabWidget, QCheckBox, QScrollArea, QTextEdit, QSizePolicy
+    QTabWidget, QCheckBox, QScrollArea, QTextEdit, QSizePolicy,
+    QListWidget, QListWidgetItem, QDialog
 )
 
 try:
     import pyqtgraph as pg
     HAS_PYQTGRAPH = True
+
+    class NumberAxis(pg.AxisItem):
+        """천 단위 구분 기호가 있는 계측기용 축 표기 (15,000 / 0.15)"""
+
+        def tickStrings(self, values, scale, spacing):
+            labels = []
+            for value in values:
+                try:
+                    if spacing >= 1 or abs(value) >= 1000:
+                        labels.append(f"{value:,.0f}")
+                    elif spacing >= 0.1:
+                        labels.append(f"{value:,.1f}")
+                    else:
+                        labels.append(f"{value:,.2f}")
+                except (TypeError, ValueError):
+                    labels.append(str(value))
+            return labels
+
 except ImportError:
     HAS_PYQTGRAPH = False
+    NumberAxis = None
 
 from core.models import (
     Specimen, SpecimenType, TestConfig, TestMode, BendingType, HoldingType,
@@ -34,10 +56,14 @@ from core.serial_driver import SerialUTMDriver
 from core.hardware_interface import HardwareInterface
 from core.calculator import MaterialCalculator
 from core.preferences import PreferencesManager
-from core.i18n import TRANSLATIONS
+from core.i18n import TRANSLATIONS, tr, step_action_label, metric_label
+from core.session import BATCH_METRICS, SpecimenSession
+from core.history import TestHistoryStore
+from core.sequence import SequenceProgram, StepAction
 from exporters.excel_exporter import ExcelExporter
 from exporters.pdf_exporter import PDFExporter
 from ui.styles import HYUNDAI_THEME_QSS
+from ui.dialogs import SequenceDialog, HistoryDialog, mode_display
 
 
 class CommunicateBridge(QObject):
@@ -65,7 +91,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.current_lang = "KO"  # 기본값: 현장 친화 쉬운 한국어
         self.setWindowTitle("SALT SW VER.1 — 만능재료시험기 제어 시스템")
-        self.resize(1360, 900)
+        self.resize(1360, 940)
         self.setMinimumSize(1100, 720)
         self.setStyleSheet(HYUNDAI_THEME_QSS)
 
@@ -73,6 +99,13 @@ class MainWindow(QMainWindow):
         self.data_points: List[DataPoint] = []
         self.current_result: Optional[TestResult] = None
         self.prefs = PreferencesManager()
+        self.session = SpecimenSession()
+        self.history = TestHistoryStore()
+        self.sequence_program: SequenceProgram = SequenceProgram.standard()
+        self._overlay_items: List[object] = []
+        self._step_markers: List[object] = []
+        self._live_record_seq: Optional[int] = None
+        self._last_completion_reason: str = ""
         self.simulator = VirtualUTMSimulator()
         self.serial_driver = SerialUTMDriver()
         self.serial_driver.set_extensometer(self.prefs.ext)
@@ -114,6 +147,16 @@ class MainWindow(QMainWindow):
         top_layout.addWidget(lbl_logo)
         top_layout.addWidget(self.lbl_app_sub)
         top_layout.addStretch()
+
+        # 시험 이력 버튼 (자동 저장된 이력 열람 · 무결성 검증)
+        self.btn_history = QPushButton("시험 이력 (0)")
+        self.btn_history.setFixedWidth(150)
+        self.btn_history.setStyleSheet(
+            "background-color: #FFFFFF; border: 1px solid #CBD5E1; font-weight: 700; "
+            "padding: 4px 10px; border-radius: 4px;"
+        )
+        self.btn_history.clicked.connect(self._open_history)
+        top_layout.addWidget(self.btn_history)
 
         # 언어 전환 토글 버튼
         self.btn_lang = QPushButton("🌐 English")
@@ -166,16 +209,25 @@ class MainWindow(QMainWindow):
         self.rb_compression.setText(t["mode_compression"])
         self.rb_bending.setText(t["mode_bending"])
         self.rb_holding.setText(t["mode_holding"])
+        self.rb_sequence.setText(t["mode_sequence"])
+
+        # Sequence panel
+        self.sequence_group.setTitle(t["seq_group"])
+        self.btn_seq_edit.setText(t["seq_edit"])
+        self._refresh_sequence_view()
 
         # Specimen
         self.group_spec.setTitle(t["spec_title"])
         self.lbl_spec_id.setText(t["spec_id"])
         self.lbl_mat.setText(t["spec_mat"])
         self.lbl_spec_type.setText(t["spec_type"])
+        self.combo_type.setItemText(0, t["spec_type_flat"])
+        self.combo_type.setItemText(1, t["spec_type_round"])
         is_flat = (self.combo_type.currentIndex() == 0)
         self.lbl_width.setText(t["spec_width"] if is_flat else t["spec_dia"])
         self.lbl_thick.setText(t["spec_thick"])
         self.lbl_l0.setText(t["spec_l0"])
+        self.chk_auto_id.setText(t["spec_auto_id"])
 
         # Conditions
         self.cond_group.setTitle(t["cond_title"])
@@ -186,6 +238,10 @@ class MainWindow(QMainWindow):
         self.lbl_hold_type.setText(t["cond_hold_type"])
         self.lbl_hold_val.setText(t["cond_hold_val"])
         self.lbl_hold_dur.setText(t["cond_hold_dur"])
+        self.combo_bend_type.setItemText(0, t["cond_bend_3p"])
+        self.combo_bend_type.setItemText(1, t["cond_bend_4p"])
+        self.combo_hold_type.setItemText(0, t["cond_hold_load"])
+        self.combo_hold_type.setItemText(1, t["cond_hold_disp"])
 
         # Controls
         self.ctrl_group.setTitle(t["ctrl_title"])
@@ -221,9 +277,36 @@ class MainWindow(QMainWindow):
         for col, h in enumerate(headers):
             self.table_results.setHorizontalHeaderItem(col, QTableWidgetItem(h))
 
+        # Specimen session / overlay
+        self.session_group.setTitle(t["session_group"])
+        for col, key in enumerate(("session_col_show", "session_col_session",
+                                   "session_col_specimen", "session_col_pmax")):
+            self.table_session.setHorizontalHeaderItem(col, QTableWidgetItem(t[key]))
+        self.btn_session_show_all.setText(t["session_show_all"])
+        self.btn_session_hide_all.setText(t["session_hide_all"])
+        self.btn_session_remove.setText(t["session_remove"])
+        self.btn_session_clear.setText(t["session_clear"])
+        self._refresh_session_table()
+
+        # Batch statistics
+        self.batch_group.setTitle(t["batch_group"])
+        for col, key in enumerate(("batch_col_metric", "batch_col_mean", "batch_col_std",
+                                   "batch_col_cv", "batch_col_min", "batch_col_max")):
+            self.table_batch.setHorizontalHeaderItem(col, QTableWidgetItem(t[key]))
+        self.btn_batch_excel.setText(t["btn_batch_excel"])
+        self.btn_batch_pdf.setText(t["btn_batch_pdf"])
+        self._refresh_batch_table()
+        self._update_history_button()
+
+        # 현재 결과표도 선택 언어로 다시 그린다
+        if self.current_result is not None:
+            self._update_results_table(self.current_result, self._last_completion_reason)
+
         # Hardware Tab
         self.settings_group.setTitle(t["hw_conn_title"])
         self.lbl_hw_mode.setText(t["hw_mode"])
+        self.combo_hw_mode.setItemText(0, t["hw_mode_sim"])
+        self.combo_hw_mode.setItemText(1, t["hw_mode_real"])
         self.lbl_hw_port.setText(t["hw_port"])
         self.btn_refresh_ports.setText(t["btn_refresh"])
         self.lbl_hw_baud.setText(t["hw_baud"])
@@ -262,8 +345,15 @@ class MainWindow(QMainWindow):
         left_scroll.setWidget(left_content)
         layout.addWidget(left_scroll, stretch=0)
 
+        # 오른쪽(계측 타일·그래프·세션·배치 통계·결과표)은 창 높이가 작을 때
+        # 위젯이 겹치치 않도록 스크롤 영역에 담는다 (일반 크기에서는 스크롤바 없음)
         right_panel = self._create_right_panel()
-        layout.addWidget(right_panel, stretch=1)
+        self.dash_scroll = QScrollArea()
+        self.dash_scroll.setWidgetResizable(True)
+        self.dash_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.dash_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.dash_scroll.setWidget(right_panel)
+        layout.addWidget(self.dash_scroll, stretch=1)
         return tab
 
     def _create_left_panel(self) -> QWidget:
@@ -272,7 +362,7 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(6, 6, 10, 6)
         layout.setSpacing(10)
 
-        # A. 시험 모드 선택 (4대 시험 모드)
+        # A. 시험 모드 선택 (4대 시험 모드 + 다단계 시퀀스)
         self.group_mode = QGroupBox("시험 종류 선택")
         mode_layout = QGridLayout(self.group_mode)
         mode_layout.setSpacing(6)
@@ -280,6 +370,7 @@ class MainWindow(QMainWindow):
         self.rb_compression = QRadioButton("압축 시험")
         self.rb_bending = QRadioButton("굽힘 시험")
         self.rb_holding = QRadioButton("유지 시험")
+        self.rb_sequence = QRadioButton("다단계 시퀀스 시험")
         self.rb_tensile.setChecked(True)
 
         self.mode_btn_group = QButtonGroup()
@@ -287,12 +378,14 @@ class MainWindow(QMainWindow):
         self.mode_btn_group.addButton(self.rb_compression, 1)
         self.mode_btn_group.addButton(self.rb_bending, 2)
         self.mode_btn_group.addButton(self.rb_holding, 3)
+        self.mode_btn_group.addButton(self.rb_sequence, 4)
         self.mode_btn_group.idToggled.connect(self._on_test_mode_toggled)
 
         mode_layout.addWidget(self.rb_tensile, 0, 0)
         mode_layout.addWidget(self.rb_compression, 0, 1)
         mode_layout.addWidget(self.rb_bending, 1, 0)
         mode_layout.addWidget(self.rb_holding, 1, 1)
+        mode_layout.addWidget(self.rb_sequence, 2, 0, 1, 2)
         layout.addWidget(self.group_mode)
 
         # B. 시편 제원 설정
@@ -338,7 +431,38 @@ class MainWindow(QMainWindow):
         spec_layout.addWidget(self.lbl_l0, 5, 0)
         spec_layout.addWidget(self.spin_l0, 5, 1)
 
+        self.chk_auto_id = QCheckBox("시험 후 시편 번호 자동 증가")
+        self.chk_auto_id.setChecked(True)
+        spec_layout.addWidget(self.chk_auto_id, 6, 0, 1, 2)
+
         layout.addWidget(self.group_spec)
+
+        # B-2. 다단계 시험 시퀀스 (시퀀스 모드에서만 표시)
+        self.sequence_group = QGroupBox("다단계 시험 시퀀스")
+        seq_layout = QVBoxLayout(self.sequence_group)
+        seq_layout.setContentsMargins(10, 12, 10, 10)
+        seq_layout.setSpacing(6)
+
+        self.lbl_seq_count = QLabel("총 4단계 · 표준 인장 4단계")
+        self.lbl_seq_count.setStyleSheet("color: #1D4ED8; font-size: 8.5pt; font-weight: 700; background: transparent;")
+        seq_layout.addWidget(self.lbl_seq_count)
+
+        self.list_sequence = QListWidget()
+        self.list_sequence.setFixedHeight(110)
+        self.list_sequence.setSelectionMode(QListWidget.SelectionMode.NoSelection)
+        self.list_sequence.setStyleSheet(
+            "QListWidget { background-color: #FFFFFF; border: 1px solid #CBD5E1; border-radius: 3px; "
+            "font-size: 8.5pt; padding: 2px; }"
+            "QListWidget::item { padding: 3px 4px; border-bottom: 1px solid #F1F5F9; }"
+        )
+        seq_layout.addWidget(self.list_sequence)
+
+        self.btn_seq_edit = QPushButton("시퀀스 편집")
+        self.btn_seq_edit.setMinimumHeight(28)
+        self.btn_seq_edit.clicked.connect(self._edit_sequence)
+        seq_layout.addWidget(self.btn_seq_edit)
+        self.sequence_group.setVisible(False)
+        layout.addWidget(self.sequence_group)
 
         # C. 시험 조건 설정 (동적 모드 연동)
         self.cond_group = QGroupBox("시험 조건 설정")
@@ -462,7 +586,7 @@ class MainWindow(QMainWindow):
         panel = QWidget()
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
+        layout.setSpacing(8)
 
         # 1. 상단 대형 디지털 계측 타일 4개
         tiles_layout = QHBoxLayout()
@@ -505,20 +629,35 @@ class MainWindow(QMainWindow):
             pg.setConfigOption('background', '#FFFFFF')
             pg.setConfigOption('foreground', '#334155')
             pg.setConfigOption('antialias', True)
-            self.plot_widget = pg.PlotWidget()
+            self.plot_widget = pg.PlotWidget(
+                axisItems={'left': NumberAxis(orientation='left'),
+                           'bottom': NumberAxis(orientation='bottom')}
+            )
             self.plot_widget.showGrid(x=True, y=True, alpha=0.15)
             self.plot_widget.setLabel('bottom', '변형률 (%)')
             self.plot_widget.setLabel('left', '응력 (MPa)')
+            # 축 제목과 눈금 숫자가 겹치지 않도록 축 폭을 명시 (고배율/긴 숫자 대응)
+            self.plot_widget.getAxis('left').setWidth(72)
+            self.plot_widget.getAxis('bottom').setHeight(42)
             self.plot_curve = self.plot_widget.plot(pen=pg.mkPen(color='#1D4ED8', width=2))
+            self.plot_widget.setMinimumHeight(120)
             graph_box_layout.addWidget(self.plot_widget)
         else:
             lbl_nograph = QLabel("pyqtgraph 라이브러리가 설치되지 않아 차트가 비활성화되었습니다.")
             lbl_nograph.setAlignment(Qt.AlignmentFlag.AlignCenter)
             graph_box_layout.addWidget(lbl_nograph)
 
-        layout.addWidget(self.graph_box, stretch=2)
+        layout.addWidget(self.graph_box, stretch=3)
+        self.graph_box.setMinimumHeight(160)
 
-        # 3. 시험 결과표
+        # 3. 시편 세션(오버레이) + 배치 통계
+        mid_row = QHBoxLayout()
+        mid_row.setSpacing(10)
+        mid_row.addWidget(self._create_session_group(), stretch=0)
+        mid_row.addWidget(self._create_batch_group(), stretch=1)
+        layout.addLayout(mid_row, stretch=2)
+
+        # 4. 시험 결과표
         self.results_group = QGroupBox("시험 결과 분석표")
         res_layout = QVBoxLayout(self.results_group)
         res_layout.setContentsMargins(10, 10, 10, 10)
@@ -528,7 +667,8 @@ class MainWindow(QMainWindow):
         self.table_results.verticalHeader().setVisible(False)
         self.table_results.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         self.table_results.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
-        self.table_results.setFixedHeight(72)
+        self.table_results.setFixedHeight(64)
+        self.table_results.setStyleSheet("QTableWidget { font-size: 8.5pt; }")
 
         for col, (label, _) in enumerate(self.RESULT_COLUMNS):
             self.table_results.setHorizontalHeaderItem(col, QTableWidgetItem(label))
@@ -547,6 +687,100 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.results_group, stretch=0)
 
         return panel
+
+    # ------------------------------------------------------------------
+    # 시편 세션 / 배치 통계 위젯
+    # ------------------------------------------------------------------
+    def _create_session_group(self) -> QGroupBox:
+        self.session_group = QGroupBox("시편 세션 / 오버레이")
+        self.session_group.setFixedWidth(300)
+        group_layout = QVBoxLayout(self.session_group)
+        group_layout.setContentsMargins(10, 12, 10, 10)
+        group_layout.setSpacing(6)
+
+        self.table_session = QTableWidget(0, 4)
+        self.table_session.setHorizontalHeaderLabels(["보기", "세션", "시편 ID", "최대 하중 (N)"])
+        self.table_session.verticalHeader().setVisible(False)
+        self.table_session.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Fixed)
+        self.table_session.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.table_session.setColumnWidth(0, 38)
+        self.table_session.setColumnWidth(1, 52)
+        self.table_session.setColumnWidth(3, 80)
+        self.table_session.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_session.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table_session.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
+        self.table_session.setWordWrap(False)
+        self.table_session.verticalHeader().setDefaultSectionSize(20)
+        self.table_session.setFixedHeight(132)
+        self.table_session.setStyleSheet("QTableWidget { font-size: 8.5pt; }")
+        self.table_session.itemChanged.connect(self._on_session_item_changed)
+        group_layout.addWidget(self.table_session)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(5)
+        self.btn_session_show_all = QPushButton("전체 보기")
+        self.btn_session_hide_all = QPushButton("전체 숨김")
+        self.btn_session_remove = QPushButton("선택 삭제")
+        self.btn_session_clear = QPushButton("세션 비우기")
+        for btn in (self.btn_session_show_all, self.btn_session_hide_all,
+                    self.btn_session_remove, self.btn_session_clear):
+            btn.setFixedHeight(24)
+            btn.setStyleSheet("font-size: 8pt; padding: 2px 3px;")
+        self.btn_session_show_all.clicked.connect(lambda: self._set_all_session_visible(True))
+        self.btn_session_hide_all.clicked.connect(lambda: self._set_all_session_visible(False))
+        self.btn_session_remove.clicked.connect(self._remove_selected_session)
+        self.btn_session_clear.clicked.connect(self._clear_session)
+        btn_row.addWidget(self.btn_session_show_all)
+        btn_row.addWidget(self.btn_session_hide_all)
+        btn_row.addWidget(self.btn_session_remove)
+        btn_row.addWidget(self.btn_session_clear)
+        group_layout.addLayout(btn_row)
+        group_layout.addStretch()
+        return self.session_group
+
+    def _create_batch_group(self) -> QGroupBox:
+        self.batch_group = QGroupBox("배치 통계 (선택 시편)")
+        group_layout = QVBoxLayout(self.batch_group)
+        group_layout.setContentsMargins(10, 12, 10, 10)
+        group_layout.setSpacing(6)
+
+        self.table_batch = QTableWidget(len(BATCH_METRICS), 6)
+        self.table_batch.setHorizontalHeaderLabels(["물성", "평균", "표준편차", "CV (%)", "최소", "최대"])
+        self.table_batch.verticalHeader().setVisible(False)
+        self.table_batch.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table_batch.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.table_batch.setColumnWidth(0, 88)
+        self.table_batch.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.table_batch.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
+        self.table_batch.setWordWrap(False)
+        self.table_batch.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.table_batch.verticalHeader().setDefaultSectionSize(21)
+        self.table_batch.setFixedHeight(146)
+        self.table_batch.setStyleSheet("QTableWidget { font-size: 8.5pt; }")
+        for row, (key, _unit, _dec) in enumerate(BATCH_METRICS):
+            item = QTableWidgetItem(metric_label(key, "KO"))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+            self.table_batch.setItem(row, 0, item)
+            for col in range(1, 6):
+                value_item = QTableWidgetItem("-")
+                value_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                self.table_batch.setItem(row, col, value_item)
+        group_layout.addWidget(self.table_batch)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self.btn_batch_excel = QPushButton("배치 요약 엑셀 (.xlsx)")
+        self.btn_batch_pdf = QPushButton("배치 요약 PDF (.pdf)")
+        self.btn_batch_excel.setMinimumHeight(28)
+        self.btn_batch_pdf.setMinimumHeight(28)
+        self.btn_batch_excel.clicked.connect(lambda: self._export_batch("xlsx"))
+        self.btn_batch_pdf.clicked.connect(lambda: self._export_batch("pdf"))
+        btn_row.addWidget(self.btn_batch_excel)
+        btn_row.addWidget(self.btn_batch_pdf)
+        group_layout.addLayout(btn_row)
+        group_layout.addStretch()
+        self._refresh_batch_table()
+        return self.batch_group
 
     def _create_hardware_tab(self) -> QWidget:
         # 내용이 많은 탭이므로 스크롤 영역에 넣어 작은 창·고배율 배율에서도 겹치지 않게 함
@@ -1085,6 +1319,16 @@ class MainWindow(QMainWindow):
             if need > 0 and content.minimumHeight() != need:
                 content.setMinimumHeight(need)
 
+        # 대시보드(오른쪽 패널)는 위젯이 자연스럽게 늘어나는 구조이므로
+        # "최소 필요 높이"까지만 고정한다 (그래프가 과도하게 커져 스크롤이 생기는 것 방지)
+        scroll = getattr(self, "dash_scroll", None)
+        if scroll is not None:
+            content = scroll.widget()
+            if content is not None and content.layout() is not None:
+                need = content.minimumSizeHint().height()
+                if need > 0 and content.minimumHeight() != need:
+                    content.setMinimumHeight(need)
+
     def _apply_preferences_language(self, t: dict):
         """환경 설정 탭 다국어 갱신"""
         self.pref_ext_group.setTitle(t["pref_ext_group"])
@@ -1245,6 +1489,7 @@ class MainWindow(QMainWindow):
             return
         is_bend = (btn_id == 2)
         is_hold = (btn_id == 3)
+        is_seq = (btn_id == 4)
 
         self.lbl_drop.setVisible(not is_hold)
         self.spin_drop.setVisible(not is_hold)
@@ -1260,6 +1505,8 @@ class MainWindow(QMainWindow):
         self.spin_hold_val.setVisible(is_hold)
         self.lbl_hold_dur.setVisible(is_hold)
         self.spin_hold_dur.setVisible(is_hold)
+
+        self.sequence_group.setVisible(is_seq)
 
     def _on_specimen_type_changed(self, index: int):
         is_flat = (index == 0)
@@ -1287,34 +1534,49 @@ class MainWindow(QMainWindow):
             mode = TestMode.COMPRESSION
         elif self.rb_bending.isChecked():
             mode = TestMode.BENDING
+        elif self.rb_sequence.isChecked():
+            mode = TestMode.SEQUENCE
         else:
             mode = TestMode.HOLDING
 
         btype = BendingType.THREE_POINT if self.combo_bend_type.currentIndex() == 0 else BendingType.FOUR_POINT
         htype = HoldingType.LOAD_HOLD if self.combo_hold_type.currentIndex() == 0 else HoldingType.DISP_HOLD
 
+        # 곡선 해상도 확보: 시편 표점거리 기준 약 0.02 mm 간격으로 샘플링한다 (20~250 Hz)
+        speed_mm_min = self.spin_speed.value()
+        samples_per_second = int(round((speed_mm_min / 60.0) / 0.02))
+        sampling_hz = max(20, min(250, samples_per_second))
+
         return TestConfig(
             mode=mode,
-            test_speed_mm_min=self.spin_speed.value(),
+            test_speed_mm_min=speed_mm_min,
             fracture_drop_ratio=self.spin_drop.value() / 100.0,
             max_displacement_mm=50.0,
-            sampling_rate_hz=20,
+            sampling_rate_hz=sampling_hz,
             bending_type=btype,
             span_length_mm=self.spin_span.value(),
             holding_type=htype,
             target_holding_val=self.spin_hold_val.value(),
             holding_duration_s=self.spin_hold_dur.value(),
             ext=self.prefs.ext.copy(),
+            sequence=self.sequence_program.copy(),
         )
 
     def _start_test(self):
         self.data_points.clear()
         self._clear_results_table()
+        self._live_record_seq = None
         if HAS_PYQTGRAPH:
             self.plot_curve.setData([], [])
+            self._replot_graph()
 
         specimen = self._get_current_specimen()
         config = self._get_current_config()
+
+        t = TRANSLATIONS[self.current_lang]
+        if config.mode == TestMode.SEQUENCE and not config.sequence.is_valid():
+            QMessageBox.warning(self, t["seq_group"], t["seq_empty_error"])
+            return
 
         # 신율계 설정을 활성 드라이버에 적용하고 표시 상태 초기화
         self.active_driver.set_extensometer(config.ext)
@@ -1350,6 +1612,7 @@ class MainWindow(QMainWindow):
     def _reset_data(self):
         self.data_points.clear()
         self.current_result = None
+        self._live_record_seq = None
         self._clear_results_table()
         if HAS_PYQTGRAPH:
             self.plot_curve.setData([], [])
@@ -1382,13 +1645,43 @@ class MainWindow(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.btn_excel.setEnabled(True)
         self.btn_pdf.setEnabled(True)
+        self._last_completion_reason = reason
 
         specimen = self._get_current_specimen()
         config = self._get_current_config()
+        t = TRANSLATIONS[self.current_lang]
 
-        self.current_result = MaterialCalculator.calculate(specimen, config, self.data_points, reason)
+        step_events = list(getattr(self.active_driver, "step_events", []) or [])
+        self.current_result = MaterialCalculator.calculate(
+            specimen, config, self.data_points, reason, sequence_steps=step_events
+        )
         self._update_results_table(self.current_result, reason)
+
+        # 1) 시험 이력 자동 저장 (SHA-256 무결성 해시 + 체인)
+        summary = None
+        try:
+            summary = self.history.save(
+                specimen, config, self.current_result, self.data_points,
+                completion_reason=reason,
+                calibration=self._calibration_snapshot(),
+                sequence_events=step_events,
+            )
+        except Exception as exc:  # 저장 실패가 시험 결과 표시를 막지 않는다
+            print(f"[MainWindow] 이력 저장 예외: {exc}")
+
+        # 2) 세션(오버레이)에 시편 추가
+        record = self.session.add(
+            specimen, config, self.current_result, self.data_points,
+            completion_reason=reason,
+            history_id=summary.record_id if summary else "",
+            integrity_digest=summary.digest if summary else "",
+            step_events=step_events,
+        )
+        self._live_record_seq = record.seq
+        self._refresh_session_table()
+        self._refresh_batch_table()
         self._replot_graph()
+        self._update_history_button()
 
         # 변형률 측정 소스 표시 (실제 시험에 적용된 소스)
         source_key = "src_crosshead"
@@ -1398,38 +1691,115 @@ class MainWindow(QMainWindow):
                 MaterialCalculator.EXT_SOURCE_MV, MaterialCalculator.EXT_SOURCE_PULSE
             ):
                 source_key = "src_crosshead"
-                self.statusBar().showMessage(TRANSLATIONS[self.current_lang]["ext_lost_warning"])
+                self.statusBar().showMessage(t["ext_lost_warning"])
         self._apply_strain_source_label(source_key)
 
-        t = TRANSLATIONS[self.current_lang]
         msg = t["status_done"].format(reason=reason, count=len(self.data_points))
         self.statusBar().showMessage(msg)
-        QMessageBox.information(
-            self,
-            "시험 완료",
-            f"시험이 완료되었습니다.\n상태: {reason}\n최대 하중: {self.current_result.peak_load_n:,.1f} N\n강도: {self.current_result.peak_stress_mpa:.2f} MPa"
-        )
+
+        # 3) 시편 번호 자동 증가 (배치 연속 시험)
+        if self.chk_auto_id.isChecked():
+            self._next_specimen_id()
+
+        integrity_note = "-"
+        if summary is not None:
+            integrity_note = t["history_integrity_ok"]
+        else:
+            integrity_note = t["hist_save_failed"]
+
+        lines = [
+            f"상태: {reason}",
+            f"최대 하중: {self.current_result.peak_load_n:,.1f} N",
+            f"강도: {self.current_result.peak_stress_mpa:.2f} MPa",
+            f"시편 세션: {self.session.records[-1].session_label if self.session.records else '-'}",
+            f"이력 · 무결성: {integrity_note}",
+        ]
+        if self.current_result.sequence_steps:
+            lines.append(f"시퀀스: {self.current_result.sequence_name or '-'}")
+        QMessageBox.information(self, "시험 완료", "시험이 완료되었습니다.\n" + "\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # 그래프 (단일 곡선 + 다중 시편 오버레이 + 시퀀스 단계 표시)
+    # ------------------------------------------------------------------
+    def _clear_overlay_items(self):
+        if not HAS_PYQTGRAPH or not hasattr(self, "plot_widget"):
+            return
+        for item in self._overlay_items + self._step_markers:
+            try:
+                self.plot_widget.removeItem(item)
+            except Exception:
+                pass
+        self._overlay_items = []
+        self._step_markers = []
+
+    @staticmethod
+    def _points_xy(points: List[DataPoint], mode: str):
+        """곡선 좌표 (ss: 응력-변형률, ld: 하중-변위) - LD 는 크로스헤드 변위 기준"""
+        if mode == "ld":
+            return [p.displacement_mm for p in points], [p.load_n for p in points]
+        return [p.strain_pct for p in points], [p.stress_mpa for p in points]
 
     def _replot_graph(self):
-        if not HAS_PYQTGRAPH or not self.data_points:
+        if not HAS_PYQTGRAPH or not hasattr(self, "plot_widget"):
             return
-        use_ext = self.current_result.ext_enabled if self.current_result else self.prefs.ext.enabled
-        if self.rb_graph_ss.isChecked():
-            self.plot_widget.setLabel('bottom', '변형률 (%)' if self.current_lang == "KO" else 'Strain (%)')
-            self.plot_widget.setLabel('left', '응력 (MPa)' if self.current_lang == "KO" else 'Stress (MPa)')
-            xs = [p.strain_pct for p in self.data_points]
-            ys = [p.stress_mpa for p in self.data_points]
+        t = TRANSLATIONS[self.current_lang]
+        mode = "ss" if self.rb_graph_ss.isChecked() else "ld"
+        if mode == "ss":
+            self.plot_widget.setLabel('bottom', t["axis_strain"])
+            self.plot_widget.setLabel('left', t["axis_stress"])
         else:
-            ext_disp = use_ext and any(p.ext_valid for p in self.data_points)
-            if ext_disp:
-                bottom = '신율계 변위 (mm)' if self.current_lang == "KO" else 'Extensometer travel (mm)'
+            self.plot_widget.setLabel('bottom', t["axis_disp"])
+            self.plot_widget.setLabel('left', t["axis_load"])
+
+        self._clear_overlay_items()
+
+        # 1) 이전 시편 오버레이 (보기 체크된 시편만)
+        for record in self.session.visible_records:
+            if len(record.points) < 2:
+                continue
+            xs, ys = record.curve(mode)
+            item = self.plot_widget.plot(xs, ys, pen=pg.mkPen(color=record.color, width=1.5))
+            self._overlay_items.append(item)
+
+        # 2) 현재 시험 곡선 (아직 세션에 들어가지 않은 진행 중 시험만 별도로 그린다)
+        if self.data_points:
+            if self._live_record_seq is None:
+                xs, ys = self._points_xy(self.data_points, mode)
+                self.plot_curve.setData(xs, ys)
             else:
-                bottom = '변위 (mm)' if self.current_lang == "KO" else 'Displacement (mm)'
-            self.plot_widget.setLabel('bottom', bottom)
-            self.plot_widget.setLabel('left', '하중 (N)' if self.current_lang == "KO" else 'Load (N)')
-            xs = [(p.ext_disp_mm if (ext_disp and p.ext_valid) else p.displacement_mm) for p in self.data_points]
-            ys = [p.load_n for p in self.data_points]
-        self.plot_curve.setData(xs, ys)
+                self.plot_curve.setData([], [])
+            x_values, y_values = self._points_xy(self.data_points, mode)
+            self._draw_step_markers(mode, x_values, y_values)
+        else:
+            self.plot_curve.setData([], [])
+
+    def _draw_step_markers(self, mode: str, xs: List[float], ys: List[float]):
+        """시퀀스 단계 시작 지점을 세로 점선 + S1/S2 표시로 그린다"""
+        if not self.current_result or not self.current_result.sequence_steps or not self.data_points:
+            return
+        top = max(ys) if ys else 1.0
+        x_max = max(xs) if xs else 1.0
+        for ev in self.current_result.sequence_steps:
+            start = float(ev.get("started_at", 0.0) or 0.0)
+            point = min(self.data_points, key=lambda p: abs(p.time_s - start))
+            x = point.displacement_mm if mode == "ld" else point.strain_pct
+            line = pg.InfiniteLine(
+                pos=x, angle=90,
+                pen=pg.mkPen(color="#94A3B8", width=1, style=Qt.PenStyle.DashLine),
+            )
+            self.plot_widget.addItem(line)
+            self._step_markers.append(line)
+            # 오른쪽 끝에 붙는 단계는 라벨을 왼쪽으로 붙여 잘리지 않게 한다
+            anchor = (-1, 0) if (x_max > 0 and x > x_max * 0.92) else (0, 0)
+            label = pg.TextItem(
+                html=f'<span style="font-size:7pt; color:#475569;">S{int(ev.get("index", 0)) + 1}</span>',
+                anchor=anchor,
+            )
+            # 단계 시작점이 가까우면 라벨이 겹치므로 계단식으로 높이를 달리 둔다
+            stagger = 0.045 * (int(ev.get("index", 0)) % 4)
+            label.setPos(x, top * (0.03 + stagger))
+            self.plot_widget.addItem(label)
+            self._step_markers.append(label)
 
     def _clear_results_table(self):
         for col in range(len(self.RESULT_COLUMNS)):
@@ -1454,6 +1824,248 @@ class MainWindow(QMainWindow):
             item = QTableWidgetItem(val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table_results.setItem(0, col, item)
+
+    # ------------------------------------------------------------------
+    # 시편 세션 / 다단계 시퀀스 / 배치 통계
+    # ------------------------------------------------------------------
+    def _refresh_sequence_view(self):
+        """시퀀스 단계 요약 목록 갱신"""
+        if not hasattr(self, "list_sequence"):
+            return
+        t = TRANSLATIONS[self.current_lang]
+        program = self.sequence_program
+        self.lbl_seq_count.setText(t["seq_count"].format(n=len(program.steps), name=program.name))
+        self.list_sequence.clear()
+        if not program.steps:
+            self.list_sequence.addItem(QListWidgetItem(t["seq_summary_empty"]))
+            return
+        for index, step in enumerate(program.steps):
+            item = QListWidgetItem(f"{index + 1}.  {step.describe(self.current_lang)}")
+            item.setToolTip(t["seq_hint"])
+            self.list_sequence.addItem(item)
+
+    def _edit_sequence(self):
+        """시퀀스 편집 다이얼로그"""
+        t = TRANSLATIONS[self.current_lang]
+        dialog = SequenceDialog(self.sequence_program, self.current_lang, self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            program = dialog.result_program()
+            if program.is_valid():
+                self.sequence_program = program
+                self._refresh_sequence_view()
+                self.statusBar().showMessage(
+                    t["seq_count"].format(n=len(program.steps), name=program.name)
+                )
+
+    def _refresh_session_table(self):
+        """세션 시편 목록 (보기 체크박스 + 색상 범례)"""
+        if not hasattr(self, "table_session"):
+            return
+        t = TRANSLATIONS[self.current_lang]
+        self.table_session.blockSignals(True)
+        self.table_session.setRowCount(0)
+        for record in self.session.records:
+            row = self.table_session.rowCount()
+            self.table_session.insertRow(row)
+
+            check = QTableWidgetItem("")
+            check.setFlags(
+                Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                | Qt.ItemFlag.ItemIsUserCheckable
+            )
+            check.setCheckState(
+                Qt.CheckState.Checked if record.visible else Qt.CheckState.Unchecked
+            )
+            check.setData(Qt.ItemDataRole.UserRole, record.seq)
+            self.table_session.setItem(row, 0, check)
+
+            label = QTableWidgetItem(record.session_label)
+            label.setForeground(QBrush(QColor(record.color)))
+            bold = QFont()
+            bold.setBold(True)
+            label.setFont(bold)
+            label.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            label.setToolTip(
+                f"{record.specimen_id} · {mode_display(record.test_mode, self.current_lang)}\n"
+                f"{record.completed_at}"
+                + (f"\n{record.history_id}" if record.history_id else "")
+            )
+            self.table_session.setItem(row, 1, label)
+
+            spec_item = QTableWidgetItem(record.specimen_id)
+            spec_item.setToolTip(record.specimen.material if record.specimen else "")
+            self.table_session.setItem(row, 2, spec_item)
+
+            pmax = QTableWidgetItem(f"{record.result.peak_load_n:,.1f}")
+            pmax.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.table_session.setItem(row, 3, pmax)
+
+        self.table_session.blockSignals(False)
+        has_records = len(self.session) > 0
+        for btn in (self.btn_session_show_all, self.btn_session_hide_all,
+                    self.btn_session_clear):
+            btn.setEnabled(has_records)
+        self.btn_session_remove.setEnabled(False)
+        self._refresh_batch_table()
+
+    def _on_session_item_changed(self, item: QTableWidgetItem):
+        if item is None or item.column() != 0:
+            return
+        seq = item.data(Qt.ItemDataRole.UserRole)
+        if seq is None:
+            return
+        if self.session.set_visible(int(seq), item.checkState() == Qt.CheckState.Checked):
+            self._refresh_batch_table()
+            self._replot_graph()
+
+    def _selected_session_seq(self) -> Optional[int]:
+        row = self.table_session.currentRow()
+        if row < 0:
+            return None
+        item = self.table_session.item(row, 0)
+        return int(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+
+    def _set_all_session_visible(self, visible: bool):
+        self.session.set_all_visible(visible)
+        self._refresh_session_table()
+        self._replot_graph()
+
+    def _remove_selected_session(self):
+        seq = self._selected_session_seq()
+        if seq is None:
+            return
+        self.session.remove(seq)
+        self._refresh_session_table()
+        self._replot_graph()
+
+    def _clear_session(self):
+        self.session.clear()
+        self._refresh_session_table()
+        self._replot_graph()
+
+    def _refresh_batch_table(self):
+        """선택(보기) 시편들로 배치 통계 표 갱신"""
+        if not hasattr(self, "table_batch"):
+            return
+        lang = self.current_lang
+        t = TRANSLATIONS[lang]
+        stats = self.session.statistics()
+        selected = len(self.session.visible_records)
+        self.batch_group.setTitle(
+            f"{t['batch_group']} · {t['batch_n'].format(n=selected)}"
+        )
+        for row, stat in enumerate(stats):
+            header = self.table_batch.item(row, 0)
+            if header is not None:
+                header.setText(metric_label(stat.key, lang))
+            for col, field_name in enumerate(("mean", "std", "cv_pct", "min", "max"), start=1):
+                item = self.table_batch.item(row, col)
+                if item is None:
+                    continue
+                item.setText(stat.formatted(field_name))
+                item.setToolTip(
+                    f"{metric_label(stat.key, lang)} {stat.unit} · n={stat.n}" if stat.has_data else ""
+                )
+
+    def _export_batch(self, kind: str):
+        """배치 요약(시편별 결과 + 통계) 엑셀/PDF 출력"""
+        t = TRANSLATIONS[self.current_lang]
+        records = self.session.records
+        if not records:
+            QMessageBox.warning(self, t["batch_group"], t["batch_export_empty"])
+            return
+        stats = self.session.statistics()
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if kind == "xlsx":
+            default_name = f"UTM_Batch_{stamp}.xlsx"
+            file_filter = "Excel Files (*.xlsx)"
+        else:
+            default_name = f"UTM_Batch_{stamp}.pdf"
+            file_filter = "PDF Files (*.pdf)"
+        filepath, _ = QFileDialog.getSaveFileName(self, t["batch_group"], default_name, file_filter)
+        if not filepath:
+            return
+        try:
+            if kind == "xlsx":
+                ExcelExporter.export_batch(filepath, records, stats, self.current_lang)
+            else:
+                PDFExporter.export_batch(filepath, records, stats, self.current_lang)
+        except Exception as exc:
+            QMessageBox.critical(self, t["batch_group"], str(exc))
+            return
+        QMessageBox.information(self, t["batch_group"], t["batch_export_done"].format(path=filepath))
+
+    # ------------------------------------------------------------------
+    # 시험 이력 / 무결성
+    # ------------------------------------------------------------------
+    def _update_history_button(self):
+        if not hasattr(self, "btn_history"):
+            return
+        t = TRANSLATIONS[self.current_lang]
+        try:
+            count = self.history.count()
+        except Exception:
+            count = 0
+        self.btn_history.setText(t["history_btn"].format(n=count))
+
+    def _open_history(self):
+        dialog = HistoryDialog(
+            self.history, self.current_lang,
+            load_callback=self._load_history_record, parent=self,
+        )
+        dialog.exec()
+        self._update_history_button()
+
+    def _load_history_record(self, record_id: str):
+        """이력 1건을 세션(오버레이)과 비교표에 불러온다"""
+        t = TRANSLATIONS[self.current_lang]
+        if self.session.has_history_record(record_id):
+            return False, t["history_duplicate"]
+        record = self.history.load(record_id)
+        if record is None:
+            return False, t["history_load_failed"]
+        self.session.add(**self.history.record_to_session_input(record))
+        self._refresh_session_table()
+        self._refresh_batch_table()
+        self._replot_graph()
+        return True, t["history_loaded"].format(id=record_id)
+
+    def _calibration_snapshot(self) -> dict:
+        """이력에 함께 저장하는 교정 상태 스냅샷"""
+        if self.active_driver is self.serial_driver:
+            data = self.serial_driver.calib_mgr.data
+            return {
+                "source": "RS-232 (Bongshin P2020 / P2014)",
+                "load_zero_offset": data.load_zero_offset,
+                "load_scale_factor": data.load_scale_factor,
+                "disp_zero_offset": data.disp_zero_offset,
+                "speed_scale_factor": data.speed_scale_factor,
+                "last_load_calib_date": data.last_load_calib_date,
+                "last_speed_calib_date": data.last_speed_calib_date,
+            }
+        return {
+            "source": "VirtualUTMSimulator",
+            "load_zero_offset": 0.0,
+            "load_scale_factor": 1.0,
+            "disp_zero_offset": 0.0,
+            "speed_scale_factor": 1.0,
+            "last_load_calib_date": "-",
+            "last_speed_calib_date": "-",
+        }
+
+    def _next_specimen_id(self):
+        """시편 ID 끝 번호를 하나 올린다 (예: SALT-SP-001 -> SALT-SP-002)"""
+        current = self.edit_specimen_id.text().strip()
+        if not current:
+            return
+        match = re.search(r"(\d+)(\D*)$", current)
+        if match:
+            digits = match.group(1)
+            new_number = str(int(digits) + 1).zfill(len(digits))
+            updated = current[:match.start(1)] + new_number + match.group(2)
+        else:
+            updated = current + "-2"
+        self.edit_specimen_id.setText(updated)
 
     def _export_excel(self):
         if not self.current_result or not self.data_points:

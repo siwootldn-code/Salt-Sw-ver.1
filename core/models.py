@@ -8,6 +8,8 @@ from enum import Enum
 import math
 from typing import List, Optional
 
+from .sequence import SequenceProgram
+
 
 class ExtensometerType(Enum):
     """신율계(변위계) 신호 방식"""
@@ -108,6 +110,7 @@ class TestMode(Enum):
     COMPRESSION = "압축 시험 (Compression)"
     BENDING = "굽힘 시험 (Bending)"
     HOLDING = "유지 시험 (Holding)"
+    SEQUENCE = "다단계 시퀀스 시험 (Sequence)"
 
 
 class BendingType(Enum):
@@ -165,9 +168,16 @@ class TestConfig:
     # 신율계(Extensometer) 설정 (환경 설정 탭에서 저장/적용)
     ext: ExtensometerSettings = field(default_factory=ExtensometerSettings)
 
+    # 다단계 시퀀스 프로그램 (시퀀스 시험 모드에서만 사용)
+    sequence: SequenceProgram = field(default_factory=SequenceProgram.standard)
+
     @property
     def use_extensometer(self) -> bool:
         return bool(self.ext and self.ext.enabled)
+
+    @property
+    def is_sequence(self) -> bool:
+        return self.mode == TestMode.SEQUENCE
 
 
 @dataclass
@@ -222,6 +232,10 @@ class TestResult:
     final_holding_val: float = 0.0      # 유지 종료 시점 계측값
     creep_deflection_mm: float = 0.0    # 크리프 추가 변위량 (mm)
     load_relaxation_pct: float = 0.0    # 응력/하중 감쇄율 (%)
+
+    # 다단계 시퀀스 실행 기록
+    sequence_name: str = ""             # 실행한 프로그램 이름
+    sequence_steps: List[dict] = field(default_factory=list)  # 단계별 전환 기록
 
     # 신율계(Extensometer) 적용 결과
     ext_enabled: bool = False           # 신율계 사용 여부

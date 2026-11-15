@@ -10,7 +10,9 @@ Salt Sw ver.1 - Material Mechanics Calculator
 - 결과에는 어떤 변위를 변형률 측정 소스로 사용했는지 기록한다 (Crosshead / Extensometer).
 """
 
-from typing import Callable, List
+from typing import Callable, List, Optional
+
+import math
 
 from .models import (
     DataPoint, ExtensometerType, Specimen, TestConfig, TestMode, BendingType, HoldingType, TestResult
@@ -44,7 +46,8 @@ class MaterialCalculator:
 
     @staticmethod
     def calculate(specimen: Specimen, config: TestConfig,
-                  data_points: List[DataPoint], completion_reason: str = "") -> TestResult:
+                  data_points: List[DataPoint], completion_reason: str = "",
+                  sequence_steps: Optional[List[dict]] = None) -> TestResult:
         """수집된 데이터 포인트 배열로부터 정밀 물성 결과 계산"""
         ext_cfg = getattr(config, "ext", None)
         ext_enabled = bool(ext_cfg and ext_cfg.enabled)
@@ -60,6 +63,8 @@ class MaterialCalculator:
                 ext_type=ext_cfg.ext_type if ext_enabled else "",
                 ext_gauge_length_mm=ext_cfg.gauge_length_mm if ext_enabled else 0.0,
                 strain_source=MaterialCalculator.SOURCE_CROSSHEAD,
+                sequence_name=config.sequence.name if config.is_sequence else "",
+                sequence_steps=list(sequence_steps or []),
             )
 
         area = specimen.cross_sectional_area_mm2
@@ -80,6 +85,25 @@ class MaterialCalculator:
         # 1. 최대 하중 및 인장/압축/굽힘 강도
         peak_point = max(data_points, key=lambda p: p.load_n)
         peak_load = peak_point.load_n
+        # 탄성계수·항복 분석은 "가압(상승) 구간"에서만 한다.
+        # (시퀀스 복귀처럼 하중이 빠진 뒤 변형이 돌아오는 구간은 선형 기울기를 왜곡한다)
+        peak_index = max(range(len(data_points)), key=lambda i: data_points[i].load_n)
+        analysis_points = data_points[:peak_index + 1] or data_points
+
+        # 시퀀스의 유지(HOLD)·복귀(RETURN) 구간은 하중이 멈춘 상태에서 변형만 진행(크리프·이완)되므로
+        # 탄성계수·항복 계산에서 제외한다. 가압 구간만으로 기울기를 구해야 값이 맞는다.
+        excluded_windows = [
+            (float(ev.get("started_at", 0.0) or 0.0), float(ev.get("ended_at", 0.0) or 0.0))
+            for ev in (sequence_steps or [])
+            if str(ev.get("action", "")) in ("HOLD", "RETURN")
+        ]
+        if excluded_windows:
+            filtered = [
+                p for p in analysis_points
+                if not any(start <= p.time_s <= end for start, end in excluded_windows)
+            ]
+            if len(filtered) >= 5:
+                analysis_points = filtered
 
         flexural_modulus_gpa = 0.0
         e_modulus_gpa = 205.0
@@ -97,7 +121,7 @@ class MaterialCalculator:
                 peak_stress = (peak_load * L) / (b * (d ** 2))
 
             # 휨 탄성계수: E_f = (L^3 * m) / (4 * b * d^3)
-            early_points = [p for p in data_points if 0.2 <= (p.ext_disp_mm if use_ext and p.ext_valid else p.displacement_mm) <= 3.0]
+            early_points = [p for p in analysis_points if 0.2 <= (p.ext_disp_mm if use_ext and p.ext_valid else p.displacement_mm) <= 3.0]
             if len(early_points) >= 3:
                 disps = [p.ext_disp_mm if use_ext and p.ext_valid else p.displacement_mm for p in early_points]
                 loads = [p.load_n for p in early_points]
@@ -138,20 +162,46 @@ class MaterialCalculator:
 
         # 3. 탄성계수 (Young's Modulus) 계산 (인장/압축)
         #    1차: 저변형률 구간(0.004~0.15%)에서 원점 통과 최소자승 기울기
-        def _regress_through_origin(points: List[DataPoint]) -> float:
-            xs = [strain_of(p) / 100.0 for p in points]
-            ys = [p.stress_mpa for p in points]
-            sxx = sum(x * x for x in xs)
-            sxy = sum(x * y for x, y in zip(xs, ys))
-            if sxx <= 0:
+        def _regress_through_origin(points: List[DataPoint], trim: bool = False) -> float:
+            """
+            원점 통과 최소자승 기울기.
+            trim=True 이면 잔차가 큰 점(유지 구간 크리프, 항복 직전 소성점)을 반복 제거해
+            정말 선형인 구간만으로 기울기를 구한다 (ASTM E111 계열의 구간 선택 방식).
+            """
+            pairs = [(strain_of(p) / 100.0, p.stress_mpa) for p in points]
+            pairs = [(x, y) for x, y in pairs if x > 0]
+            if not pairs:
                 return 0.0
-            return sxy / sxx
+
+            def slope_of(items):
+                sxx = sum(x * x for x, _ in items)
+                if sxx <= 0:
+                    return 0.0
+                return sum(x * y for x, y in items) / sxx
+
+            slope = slope_of(pairs)
+            if not trim:
+                return slope
+
+            for _ in range(3):
+                residuals = [y - slope * x for x, y in pairs]
+                if not residuals:
+                    break
+                sigma = math.sqrt(sum(r * r for r in residuals) / len(residuals))
+                if sigma <= 1e-9:
+                    break
+                kept = [(x, y) for (x, y), r in zip(pairs, residuals) if abs(r) <= 2.0 * sigma]
+                if len(kept) < 2 or len(kept) == len(pairs):
+                    break
+                pairs = kept
+                slope = slope_of(pairs)
+            return slope
 
         def _yield_02(e_modulus_mpa: float):
             """0.2% 오프셋 방식으로 항복 응력/하중 탐색"""
             slope = max(1.0, e_modulus_mpa)
             offset = 0.002
-            for p in data_points:
+            for p in analysis_points:
                 strain_val = strain_of(p) / 100.0
                 if strain_val > offset:
                     offset_line_stress = slope * (strain_val - offset)
@@ -161,7 +211,7 @@ class MaterialCalculator:
 
         def _elastic_band(max_strain_pct: float, max_stress_mpa: float = None) -> List[DataPoint]:
             band = []
-            for p in data_points:
+            for p in analysis_points:
                 s_pct = strain_of(p)
                 if s_pct < 0.004 or s_pct > max_strain_pct:
                     continue
@@ -173,9 +223,9 @@ class MaterialCalculator:
         yield_stress = 0.0
         yield_load = 0.0
 
-        if config.mode in [TestMode.TENSILE, TestMode.COMPRESSION]:
+        if config.mode in [TestMode.TENSILE, TestMode.COMPRESSION, TestMode.SEQUENCE]:
             first_band = _elastic_band(0.15)
-            e_first = _regress_through_origin(first_band) if len(first_band) >= 2 else 0.0
+            e_first = _regress_through_origin(first_band, trim=True) if len(first_band) >= 2 else 0.0
             if e_first <= 1000.0:
                 e_first = 205000.0
 
@@ -186,8 +236,9 @@ class MaterialCalculator:
 
             # 2차: 항복 응력의 50% 이하(진짜 선형 구간)만으로 재회귀
             refined = _elastic_band(0.5, max_stress_mpa=yield_stress * 0.5)
-            e_refined = _regress_through_origin(refined) if len(refined) >= 2 else 0.0
-            if 1000.0 < e_refined < 500000.0:
+            e_refined = _regress_through_origin(refined, trim=True) if len(refined) >= 2 else 0.0
+            # 재회귀 결과가 첫 추정치와 동떨어지면(데이터 부족·구간 편중) 첫 추정치를 유지한다
+            if 1000.0 < e_refined < 500000.0 and 0.5 * e_first < e_refined < 2.0 * e_first:
                 e_modulus_gpa = max(0.1, e_refined / 1000.0)
                 yield_stress, yield_load = _yield_02(e_refined)
                 if yield_stress == 0.0:
@@ -206,10 +257,12 @@ class MaterialCalculator:
                 yield_load = peak_load * 0.62
 
         # 5. 파단 하중, 파단 변위, 파단 연신율 (Fracture)
-        last_point = data_points[-1]
-        break_load = last_point.load_n
-        break_disp = last_point.displacement_mm          # 크로스헤드 변위
-        elongation = strain_of(last_point)               # 분석 기준 변형률 (신율계 사용 시 신율계)
+        #    시퀀스 복귀(RETURN)처럼 파단 뒤에 단계가 더 있으면 마지막 점은 변형이 풀린 상태다.
+        #    따라서 분석 변형률이 가장 큰 지점을 파단 시점으로 본다 (일반 인장 시험은 마지막 점과 동일).
+        break_point = max(data_points, key=strain_of)
+        break_load = break_point.load_n
+        break_disp = break_point.displacement_mm          # 크로스헤드 변위
+        elongation = strain_of(break_point)                # 분석 기준 변형률 (신율계 사용 시 신율계)
         is_fractured = "파단" in completion_reason
 
         # 6. 파괴 에너지 / 흡수 에너지 (Toughness / Energy) - 크로스헤드 변위 기준 일량
@@ -261,4 +314,6 @@ class MaterialCalculator:
             ext_max_disp_mm=round(ext_max_disp, 4),
             ext_break_disp_mm=round(ext_break_disp, 4),
             strain_source=strain_source,
+            sequence_name=config.sequence.name if config.is_sequence else "",
+            sequence_steps=list(sequence_steps or []),
         )

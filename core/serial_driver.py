@@ -18,8 +18,9 @@ except ImportError:
     HAS_PYSERIAL = False
 
 from .hardware_interface import HardwareInterface
-from .models import DataPoint, ExtensometerSettings, TestConfig, Specimen
+from .models import DataPoint, ExtensometerSettings, TestConfig, Specimen, TestMode
 from .calibration import CalibrationManager
+from .sequence import SequenceController, SequenceProgram, StepAction
 
 
 class SerialUTMDriver(HardwareInterface):
@@ -64,6 +65,23 @@ class SerialUTMDriver(HardwareInterface):
         self.ext_unit_multiplier: float = 1.0   # 기본: mm
         self.last_raw_ext: float = 0.0
         self.ext_signal_lost: bool = False      # 신율계 사용 설정인데 채널 신호가 없음
+
+        # 다단계 시퀀스 상태 (RS-232 소프트웨어 오케스트레이션)
+        self.sequence_ctl: Optional[SequenceController] = None
+        self.sequence_commands: List[str] = []   # 실제 전송한 명령 기록
+        self._seq_peak_load: float = 0.0
+        self._seq_fractured: bool = False
+
+    # ------------------------------------------------------------------
+    def set_sequence(self, program: Optional[SequenceProgram]):
+        """시퀀스 프로그램 지정 (시험 시작 전)"""
+        self._pending_sequence = program
+
+    def current_sequence_status(self) -> str:
+        """현재 시퀀스 진행 상태 문자열"""
+        if self.sequence_ctl is None:
+            return ""
+        return self.sequence_ctl.progress_text("KO")
 
     def set_extensometer(self, settings: Optional[ExtensometerSettings]):
         """환경 설정의 신율계 구성 적용"""
@@ -144,10 +162,21 @@ class SerialUTMDriver(HardwareInterface):
         self.config = config
         self.is_running = True
         self.start_time = time.time()
+        self.step_events = []
+        self.sequence_name = ""
+        self._seq_peak_load = 0.0
+        self._seq_fractured = False
+        self.sequence_commands = []
 
         # 환경 설정의 신율계 구성 적용 (사용 안 함이면 채널 무시)
         if config.ext is not None:
             self.set_extensometer(config.ext)
+
+        # 다단계 시퀀스 준비 (소프트웨어 오케스트레이션)
+        self.sequence_ctl = None
+        if config.mode == TestMode.SEQUENCE:
+            self.sequence_ctl = SequenceController(config.sequence)
+            self.sequence_name = config.sequence.name
 
         # 시작 시 현재 값을 영점으로 자동 보정
         self.tare_load()
@@ -156,6 +185,12 @@ class SerialUTMDriver(HardwareInterface):
     def stop_test(self):
         """시험 중지 (비상 정지)"""
         self.is_running = False
+        if self.sequence_ctl is not None:
+            for line in self._seq_apply(self.sequence_ctl.abort(self._now(), self.last_raw_load,
+                                                                self.last_raw_disp, "중단")):
+                self.send_command(line)
+            self.step_events = self.sequence_ctl.events_as_dicts()
+            self.sequence_ctl = None
         if self.on_test_completed:
             self.on_test_completed("사용자 중지 또는 시험 완료")
 
@@ -237,6 +272,12 @@ class SerialUTMDriver(HardwareInterface):
                 dp = self._parse_packet(line)
                 if dp and self.is_running and self.on_data_received:
                     self.on_data_received(dp)
+                    finished = self._sequence_tick(dp)
+                    if finished:
+                        self.is_running = False
+                        self.sequence_ctl = None
+                        if self.on_test_completed:
+                            self.on_test_completed(finished)
 
             except Exception as e:
                 time.sleep(0.005)
