@@ -61,12 +61,21 @@ class ExcelExporter:
 
         # 기본 정보 섹션
         current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        if result.ext_enabled:
+            ext_type_label = "mV 타입 (아날로그 mV/V)" if result.ext_type == "MV" else "펄스 타입 (엔코더 Pulse)"
+            ext_gl_str = f"{result.ext_gauge_length_mm:.1f} mm"
+        else:
+            ext_type_label = "미사용 (크로스헤드 변위 기준)"
+            ext_gl_str = "-"
+
         info_data = [
             ("시험 일시", current_time_str, "시험 모드", config.mode.value),
             ("시편 ID", specimen.specimen_id, "시험 속도", f"{config.test_speed_mm_min} mm/min"),
             ("시편 재질", specimen.material, "시편 형태", specimen.specimen_type.value),
             ("초기 표점거리 (L0)", f"{specimen.gauge_length_mm} mm", "초기 단면적 (A0)", f"{result.area_mm2:.3f} mm²"),
-            ("총 시험 시간", f"{result.total_time_s:.2f} 초", "수집 샘플 수", f"{result.total_samples:,} 개")
+            ("총 시험 시간", f"{result.total_time_s:.2f} 초", "수집 샘플 수", f"{result.total_samples:,} 개"),
+            ("신율계", ext_type_label, "신율계 표점거리 (GL)", ext_gl_str),
+            ("변형률 측정 소스", result.strain_source, "신율계 최대 변위", f"{result.ext_max_disp_mm:.3f} mm" if result.ext_enabled else "-")
         ]
 
         row_idx = 4
@@ -113,10 +122,14 @@ class ExcelExporter:
             ("0.2% 오프셋 항복강도 (Yield Strength)", "Rp0.2", result.yield_stress_mpa, "MPa", "항복 기준"),
             ("항복 하중 (Yield Load)", "Py", result.yield_load_n, "N", "항복 시점 하중"),
             ("탄성 계수 (Young's Modulus)", "E", result.elastic_modulus_gpa, "GPa", "초기 선형 기울기"),
-            ("파단 연신율 (Elongation at Break)", "A", result.elongation_pct, "%", "파단 시점 변형률"),
-            ("파단 변위 (Break Displacement)", "dL", result.break_displacement_mm, "mm", "최종 이동 거리"),
+            ("파단 연신율 (Elongation at Break)", "A", result.elongation_pct, "%", "파단 시점 변형률 (" + ("신율계 기준" if result.ext_enabled else "크로스헤드 기준") + ")"),
+            ("파단 변위 (Break Displacement)", "dL", result.break_displacement_mm, "mm", "최종 이동 거리 (크로스헤드)"),
             ("흡수 에너지 / 인성 (Toughness)", "U", result.energy_joule, "J", "하중-변위 곡선 면적")
         ]
+        if result.ext_enabled:
+            prop_results.append(
+                ("신율계 파단 변위 (Extensometer at Break)", "dL_ext", result.ext_break_disp_mm, "mm", "신율계 측정값")
+            )
 
         for prop_name, symbol, val, unit, note in prop_results:
             ws_summary.cell(row=row_idx, column=1, value=prop_name).font = regular_font
@@ -153,7 +166,9 @@ class ExcelExporter:
         ws_raw = wb.create_sheet(title="계측 원시 데이터")
         ws_raw.views.sheetView[0].showGridLines = True
 
-        raw_headers = ["시간 (Time, s)", "변위 (Disp, mm)", "하중 (Load, N)", "응력 (Stress, MPa)", "변형률 (Strain, %)"]
+        raw_headers = ["시간 (Time, s)", "크로스헤드 변위 (Disp, mm)", "하중 (Load, N)", "응력 (Stress, MPa)", "변형률 (Strain, %)"]
+        if result.ext_enabled:
+            raw_headers += ["신율계 변위 (Ext, mm)", "신율계 변형률 (Ext Strain, %)", "신율계 원시값"]
         for c_idx, r_text in enumerate(raw_headers, start=1):
             cell = ws_raw.cell(row=1, column=c_idx, value=r_text)
             cell.font = col_header_font
@@ -174,7 +189,17 @@ class ExcelExporter:
             c4.number_format = '#,##0.00'
             c5.number_format = '0.00'
 
-            for c in (c1, c2, c3, c4, c5):
+            cells = [c1, c2, c3, c4, c5]
+            if result.ext_enabled:
+                c6 = ws_raw.cell(row=r_idx, column=6, value=dp.ext_disp_mm)
+                c7 = ws_raw.cell(row=r_idx, column=7, value=dp.ext_strain_pct)
+                c8 = ws_raw.cell(row=r_idx, column=8, value=dp.ext_raw)
+                c6.number_format = '0.0000'
+                c7.number_format = '0.00'
+                c8.number_format = '#,##0.0000'
+                cells += [c6, c7, c8]
+
+            for c in cells:
                 c.font = regular_font
                 c.alignment = right_align
 

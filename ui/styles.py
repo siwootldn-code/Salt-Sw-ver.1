@@ -126,12 +126,21 @@ QLineEdit:disabled, QDoubleSpinBox:disabled, QSpinBox:disabled, QComboBox:disabl
     border-color: #E2E8F0;
 }
 
-QComboBox::drop-down {
-    subcontrol-origin: padding;
-    subcontrol-position: top right;
-    width: 22px;
-    border-left: 1px solid #CBD5E1;
-    background-color: #F8FAFC;
+/* 콤보박스 화살표는 기본 스타일을 사용 (직접 그리면 계단 모양 잔상이 남음) */
+
+/* 그룹 박스 내부 라벨/체크박스는 바탕을 투명하게 (흰 카드 위 회색 박스 방지) */
+QGroupBox QLabel,
+QGroupBox QRadioButton,
+QGroupBox QCheckBox {
+    background-color: transparent;
+}
+
+/* 스핀박스 증감 버튼은 표시하지 않음 (입력·방향키·휠로 조정, 계측기 UI 의 불필요한 장식 배제) */
+QDoubleSpinBox::up-button, QDoubleSpinBox::down-button,
+QSpinBox::up-button, QSpinBox::down-button {
+    width: 0px;
+    border: none;
+    background: transparent;
 }
 
 /* 라디오 버튼 (간결한 세그먼트 느낌) */
@@ -190,6 +199,12 @@ QPushButton#btn_start {
 
 QPushButton#btn_start:hover {
     background-color: #047857;
+}
+
+QPushButton#btn_start:disabled {
+    background-color: #E2E8F0;
+    color: #94A3B8;
+    border-color: #CBD5E1;
 }
 
 QPushButton#btn_stop {

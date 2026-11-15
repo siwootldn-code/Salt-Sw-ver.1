@@ -28,3 +28,7 @@ htmlcov/
 .vscode/
 *.swp
 *.swo
+
+# 실행 중 생성되는 환경 설정 / 교정 파일
+preferences.json
+calib_config.json

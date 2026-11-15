@@ -5,7 +5,7 @@ Salt Sw ver.1 - Hardware Interface Base Class
 
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
-from .models import DataPoint, TestConfig, Specimen
+from .models import DataPoint, ExtensometerSettings, TestConfig, Specimen
 
 
 class HardwareInterface(ABC):
@@ -48,4 +48,12 @@ class HardwareInterface(ABC):
 
     def tare_displacement(self):
         """변위 영점 맞춤 (Tare)"""
+        pass
+
+    def tare_extensometer(self):
+        """신율계 영점 맞춤 (mV 오프셋 / 펄스 카운트 기준점 설정)"""
+        pass
+
+    def set_extensometer(self, settings: Optional[ExtensometerSettings]):
+        """신율계 설정 적용 (환경 설정 값) - 지원하지 않는 드라이버는 무시"""
         pass

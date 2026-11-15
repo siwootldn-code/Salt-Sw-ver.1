@@ -60,6 +60,18 @@ class CalibrationManager:
         """원시 하중값에 영점 및 스팬 교정 계수 적용"""
         return (raw_load - self.data.load_zero_offset) * self.data.load_scale_factor
 
+    def set_zero_offset(self, raw_load: float) -> float:
+        """현재 원시 하중값을 새 무부하 영점으로 설정하고 저장"""
+        self.data.load_zero_offset = round(float(raw_load), 4)
+        self.save()
+        return self.data.load_zero_offset
+
+    def set_disp_zero_offset(self, raw_disp: float) -> float:
+        """현재 원시 변위값을 새 영점으로 설정하고 저장"""
+        self.data.disp_zero_offset = round(float(raw_disp), 4)
+        self.save()
+        return self.data.disp_zero_offset
+
     def apply_disp(self, raw_disp: float) -> float:
         """원시 변위값에 영점 및 스케일 계수 적용"""
         return (raw_disp - self.data.disp_zero_offset) * self.data.disp_scale_factor

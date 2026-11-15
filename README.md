@@ -25,6 +25,12 @@
    - **PDF 시험 성적서 (.pdf)**: 시험 결과 요약표 + 선명한 벡터 S-S 곡선 그래프 + 결재/서명란 포함 정식 시험 성적서
 5. **가상 계측 시뮬레이터 내장 (Built-in Virtual Hardware Simulator)**
    - 실제 하드웨어 연결 전에도 개발, 검증, 시연이 가능하도록 물리 기반 가상 하드웨어 엔진 탑재 (선형 탄성, 소성 가공경화, 네킹, 파단 시뮬레이션)
+6. **신율계(Extensometer) 호환 — mV 타입 · 펄스 타입 (Extensometer Support)**
+   - 환경 설정에서 **사용 안 함 / 사용함**을 선택하고, 사용 시 **mV 타입(아날로그 mV/V)** 또는 **펄스 타입(엔코더 Pulse)** 을 지정
+   - mV 타입: 정격 출력(mV/V)·정격 변위(mm)·여자 전압(V)·교정 계수·영점 오프셋(mV), 표점거리(GL)
+   - 펄스 타입: 분해능(mm/pulse)·방향 반전·영점 카운트, 표점거리(GL)
+   - 신율계를 사용하면 **탄성계수(E)·0.2% 오프셋 항복강도(Rp0.2)·연신율(A)** 을 신율계 변위 기준으로 계산하고, 결과·엑셀·PDF 성적서에 **측정 소스(크로스헤드 / 신율계 mV / 신율계 펄스)** 를 기록
+   - 설정은 `preferences.json`에 저장되어 다음 실행에도 유지 (설정 파일이 없거나 일부 항목이 빠져도 기본값으로 동작)
 
 ---
 
@@ -34,9 +40,13 @@
 salt-sw-v1/
 ├── core/
 │   ├── __init__.py
-│   ├── models.py              # 시편, 시험조건, 계측데이터, 시험결과 데이터 모델
-│   ├── simulator.py           # 가상 계측기 하드웨어 물리 시뮬레이터
-│   ├── calculator.py          # 물성치(인장강도, 항복강도, 연신율 등) 자동 연산기
+│   ├── models.py              # 시편, 시험조건, 신율계 설정, 계측데이터, 시험결과 데이터 모델
+│   ├── simulator.py           # 가상 계측기 하드웨어 물리 시뮬레이터 (신율계 mV/펄스 신호 생성)
+│   ├── calculator.py          # 물성치(인장강도, 항복강도, 탄성계수, 연신율 등) 자동 연산기
+│   ├── preferences.py         # 환경 설정(신율계 구성) 영구 저장 관리자 (preferences.json)
+│   ├── serial_driver.py       # 봉신 P2020/P2014 RS-232 드라이버 (신율계 채널 선택 파싱)
+│   ├── calibration.py         # 하중/속도/변위 정밀 교정 관리자
+│   ├── i18n.py                # 한/영 UI 문자열
 │   └── hardware_interface.py  # 실제 장비 연동용 추상 하드웨어 인터페이스
 ├── exporters/
 │   ├── __init__.py
@@ -44,8 +54,11 @@ salt-sw-v1/
 │   └── pdf_exporter.py        # reportlab 기반 벡터 S-S 곡선 포함 PDF 성적서 생성기
 ├── ui/
 │   ├── __init__.py
-│   ├── main_window.py         # PyQt6 기반 전문 UTM 대시보드 윈도우
-│   └── styles.py              # 산업용 고시인성 다크 테마 QSS
+│   ├── main_window.py         # PyQt6 기반 전문 UTM 대시보드 윈도우 + 환경 설정 탭
+│   └── styles.py              # 산업용 고시인성 테마 QSS
+├── tests/                     # 신율계·환경설정·UI 자동 검증 (unittest)
+├── tools/capture_ui.py        # offscreen UI 스크린샷 생성 스크립트
+├── docs/screenshots/          # UI 검증 스크린샷
 ├── output/                    # 엑셀 및 PDF 결과물 저장 디렉토리
 ├── cli_demo.py                # 터미널 즉시 실행 및 기능 검증 데모 스크립트
 ├── main.py                    # GUI 메인 애플리케이션 실행 파일
@@ -78,9 +91,42 @@ python main.py
 ### 3. 터미널(CLI) 데모 및 리포트 생성 테스트
 디스플레이 화면이 없는 환경이나 빠른 기능 검증을 위해 CLI 데모를 실행할 수 있습니다.
 ```bash
-python cli_demo.py
+python cli_demo.py          # 신율계 미사용 / mV 타입 / 펄스 타입 3종 비교
+python cli_demo.py mv       # mV 타입만
+python cli_demo.py pulse    # 펄스 타입만
+python cli_demo.py off      # 신율계 미사용만
 ```
-실행 시 가상 인장 시험이 진행되고, `output/` 폴더에 즉시 엑셀(`Salt_UTM_Demo_Report.xlsx`)과 PDF(`Salt_UTM_Demo_Certificate.pdf`)가 생성됩니다.
+실행 시 가상 인장 시험이 진행되고, `output/` 폴더에 엑셀(`Salt_UTM_Demo_Report_mv.xlsx` 등)과 PDF 성적서가 생성됩니다.
+
+### 4. 자동 검증 테스트
+```bash
+python -m unittest discover -s tests -v
+```
+신율계 신호 환산(mV/펄스), 환경 설정 저장·복원, RS-232 패킷 파싱, 3가지 모드의 전 과정 시험·계산·성적서 출력, 환경 설정 탭 UI 동작을 검증합니다.
+
+---
+
+## ⚙️ 신율계(Extensometer) 설정 방법
+
+1. 상단 **환경 설정** 탭을 엽니다.
+2. **신율계 사용**에서 `사용함 (신율계 적용)`을 선택합니다.
+3. **신호 방식**을 고릅니다.
+   - `mV 타입 (아날로그 mV/V)`: 정격 출력(mV/V), 정격 변위(mm), 여자 전압(V), 교정 계수, 영점 오프셋(mV)
+   - `펄스 타입 (엔코더 Pulse)`: 분해능(mm/pulse), 방향 반전
+4. **표점거리 GL(mm)** 을 입력합니다 (연신율·탄성계수 계산 기준 길이).
+5. **설정 저장 및 적용**을 누르면 `preferences.json`에 저장되고 다음 시험부터 적용됩니다.
+   - 시험 중 신율계 영점이 필요하면 **신율계 영점 맞춤**을 누릅니다.
+6. 시험 화면에는 **신율계 변위** 타일이 추가되고, 결과표 아래에 **변형률 측정 소스**가 표시됩니다.
+
+> 신율계 채널이 없는 패킷만 들어오면 자동으로 크로스헤드 변위 기준으로 계산하고, 결과에 그 사실을 기록합니다.
+
+### RS-232 신율계 채널 패킷 예 (선택 항목)
+```text
+ST,GS,+0012.35kg,+0001.20mm,+3.421mV     # mV 타입
+ST,GS,+0012.35kg,+0001.20mm,#12450       # 펄스 타입 (펄스 카운트)
+ST,GS,+0012.35kg,+0001.20mm,+3.421       # 세 번째 필드를 선택된 타입으로 해석
+ST,GS,+0012.35kg,+0001.20mm              # 신율계 없음 (크로스헤드 변위 기준)
+```
 
 ---
 
@@ -109,6 +155,24 @@ class SerialUTMHardware(HardwareInterface):
         # 모터 긴급 정지 명령 송신
         self.ser.write(b"STOP\r\n")
 ```
+
+---
+
+## 🖼 UI 검증 스크린샷 (docs/screenshots)
+
+| 파일 | 내용 |
+| --- | --- |
+| `01_dashboard_ext_off_ko.png` | 신율계 미사용 대시보드 |
+| `02_preferences_ext_off_ko.png` | 환경 설정 탭 (사용 안 함) |
+| `03_preferences_ext_mv_ko.png` | 환경 설정 탭 (mV 타입) |
+| `04_dashboard_ext_mv_live_ko.png` | mV 신율계 시험 중 화면 |
+| `05_dashboard_ext_mv_result_ko.png` | 시험 완료 결과표 (측정 소스 표기) |
+| `06_preferences_ext_pulse_en.png` | 영문 UI · 펄스 타입 설정 |
+| `07_preferences_ext_off_en.png` | 영문 UI · 사용 안 함 |
+| `08_preferences_pulse_min_size_ko.png` | 최소 창 크기(1120x740) 레이아웃 확인 |
+| `09_dashboard_ext_pulse_live_ko.png` | 펄스 신율계 시험 중 화면 |
+
+스크린샷 재생성: `QT_QPA_PLATFORM=offscreen python tools/capture_ui.py`
 
 ---
 

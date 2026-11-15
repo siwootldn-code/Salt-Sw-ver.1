@@ -18,7 +18,7 @@ except ImportError:
     HAS_PYSERIAL = False
 
 from .hardware_interface import HardwareInterface
-from .models import DataPoint, TestConfig, Specimen
+from .models import DataPoint, ExtensometerSettings, TestConfig, Specimen
 from .calibration import CalibrationManager
 
 
@@ -28,6 +28,7 @@ class SerialUTMDriver(HardwareInterface):
     - 봉신(Bongshin) 로드셀 및 P2020, P2014 인디케이터 115,200 bps 지원
     - 백그라운드 고속 데이터 수신 스레드
     - 하중(Load, N/kN/kgf) 및 변위(Displacement, mm) 실시간 파싱
+    - 신율계(Extensometer) 선택 채널 파싱 (mV 아날로그 / 엔코더 펄스), 채널이 없으면 크로스헤드 변위로 자동 대체
     - 영점(Tare/Zero) 보정 및 스케일 변환
     - 원시 패킷(Raw Packet) 실시간 모니터링 지원
     """
@@ -57,6 +58,26 @@ class SerialUTMDriver(HardwareInterface):
         # N: 1.0, kN: 1000.0, kgf: 9.80665
         self.load_unit_multiplier: float = 1.0  
         self.disp_unit_multiplier: float = 1.0  # 기본: mm
+
+        # 신율계(Extensometer) 채널 상태 (환경 설정 값 반영)
+        self.ext: ExtensometerSettings = ExtensometerSettings()
+        self.ext_unit_multiplier: float = 1.0   # 기본: mm
+        self.last_raw_ext: float = 0.0
+        self.ext_signal_lost: bool = False      # 신율계 사용 설정인데 채널 신호가 없음
+
+    def set_extensometer(self, settings: Optional[ExtensometerSettings]):
+        """환경 설정의 신율계 구성 적용"""
+        self.ext = settings.copy() if settings else ExtensometerSettings()
+        self.ext_signal_lost = False
+
+    def tare_extensometer(self):
+        """현재 신율계 원시값을 영점으로 설정 (mV 오프셋 / 펄스 카운트 기준점)"""
+        if self.ext.is_mv:
+            self.ext.zero_offset_mv = round(self.last_raw_ext, 5)
+            print(f"[SerialUTMDriver] 신율계 영점 설정 (mV): {self.ext.zero_offset_mv}")
+        else:
+            self.ext.zero_offset_pulse = round(self.last_raw_ext)
+            print(f"[SerialUTMDriver] 신율계 영점 설정 (pulse): {self.ext.zero_offset_pulse}")
 
     @staticmethod
     def list_available_ports() -> List[str]:
@@ -123,7 +144,11 @@ class SerialUTMDriver(HardwareInterface):
         self.config = config
         self.is_running = True
         self.start_time = time.time()
-        
+
+        # 환경 설정의 신율계 구성 적용 (사용 안 함이면 채널 무시)
+        if config.ext is not None:
+            self.set_extensometer(config.ext)
+
         # 시작 시 현재 값을 영점으로 자동 보정
         self.tare_load()
         self.tare_displacement()
@@ -218,12 +243,17 @@ class SerialUTMDriver(HardwareInterface):
 
     def _parse_packet(self, line: str) -> Optional[DataPoint]:
         """
-        봉신 및 P2020, P2014 인디케이터 데이터 파싱
+        봉신 및 P2020, P2014 인디케이터 데이터 패킷 파싱
         지원 형식:
         1. CSV 형식: "+0012.35, +0001.20" (하중, 변위)
         2. 공백 구분자: "+0012.35  +0001.20"
         3. 봉신 인디케이터 표준 헤더 포맷: "ST,GS,+0012.35kg, +0001.20mm"
         4. 단일 하중 스트림: "ST,GS,+0012.35kg"
+        5. 신율계 채널 포함 (선택 항목):
+           - mV 타입: "ST,GS,+0012.35kg, +0001.20mm, +3.421mV" 또는 세 번째 순수 숫자 필드
+           - 펄스 타입: "ST,GS,+0012.35kg, +0001.20mm, #12450" 또는 세 번째 순수 숫자 필드
+        신율계 미사용 시에는 세 번째 필드가 있어도 무시되며, 사용 설정인데 채널이 없으면
+        크로스헤드 변위로 자동 대체하고 ext_signal_lost 플래그를 세운다.
         """
         try:
             current_time = time.time() - self.start_time if self.start_time > 0 else 0.0
@@ -237,7 +267,7 @@ class SerialUTMDriver(HardwareInterface):
                 return None
 
             raw_load = float(numbers[0])
-            raw_disp = float(numbers[1]) if len(numbers) >= 2 else (current_time * (self.config.speed_mm_min / 60.0) if self.config else 0.0)
+            raw_disp = float(numbers[1]) if len(numbers) >= 2 else (current_time * (self.config.test_speed_mm_min / 60.0) if self.config else 0.0)
 
             self.last_raw_load = raw_load
             self.last_raw_disp = raw_disp
@@ -254,18 +284,67 @@ class SerialUTMDriver(HardwareInterface):
             area = self.specimen.cross_sectional_area_mm2 if self.specimen else 1.0
             gauge = self.specimen.gauge_length_mm if self.specimen else 50.0
 
+            # 신율계 채널 (선택)
+            ext_raw = self._extract_ext_raw(cleaned, numbers)
+            ext_valid = False
+            ext_disp_mm = 0.0
+            ext_strain_pct = 0.0
+            if self.ext.enabled:
+                if ext_raw is None:
+                    self.ext_signal_lost = True
+                else:
+                    self.ext_signal_lost = False
+                    self.last_raw_ext = ext_raw
+                    ext_disp_mm = self.ext.to_displacement(ext_raw) * self.ext_unit_multiplier
+                    ext_strain_pct = self.ext.to_strain_pct(ext_disp_mm)
+                    ext_valid = True
+            elif ext_raw is not None:
+                # 미사용 설정이어도 원시값은 모니터링용으로 유지
+                self.last_raw_ext = ext_raw
+
             # 응력: MPa = N / mm^2
             stress_mpa = load_n / area if area > 0 else 0.0
-            # 변형률: % = (변위 / 표점거리) * 100
-            strain_pct = (disp_mm / gauge) * 100.0 if gauge > 0 else 0.0
+
+            # 변형률: 신율계 신호가 있으면 신율계 표점거리 기준, 없으면 크로스헤드 변위 기준
+            if ext_valid:
+                strain_pct = ext_strain_pct
+            else:
+                strain_pct = (disp_mm / gauge) * 100.0 if gauge > 0 else 0.0
 
             return DataPoint(
                 time_s=round(current_time, 3),
                 displacement_mm=round(disp_mm, 4),
                 load_n=round(load_n, 2),
                 stress_mpa=round(stress_mpa, 2),
-                strain_pct=round(strain_pct, 3)
+                strain_pct=round(strain_pct, 3),
+                ext_disp_mm=round(ext_disp_mm, 4),
+                ext_strain_pct=round(ext_strain_pct, 3),
+                ext_raw=round(ext_raw, 4) if ext_raw is not None else 0.0,
+                ext_valid=ext_valid,
             )
         except Exception:
             pass
+        return None
+
+    def _extract_ext_raw(self, cleaned: str, numbers: List[str]) -> Optional[float]:
+        """
+        패킷에서 신율계 원시 신호를 추출한다.
+        1) mV 단위 표기 토큰: "+3.421mV"
+        2) 펄스 수 표기 토큰: "#12450", "12450pls", "12450 pulse", "12450 counts"
+        3) 위 표기가 없고 숫자 필드가 3개 이상이면 세 번째 필드를 선택된 타입으로 해석
+        """
+        m = re.search(r"([-+]?\d*\.?\d+)\s*m\s*[vV]\b", cleaned)
+        if m:
+            return float(m.group(1))
+
+        m = re.search(r"([-+]?\d+)\s*(?:pls|plse|pulse|pulses|cnt|counts?)\b", cleaned, re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+
+        m = re.search(r"#\s*([-+]?\d+)", cleaned)
+        if m:
+            return float(m.group(1))
+
+        if len(numbers) >= 3:
+            return float(numbers[2])
         return None

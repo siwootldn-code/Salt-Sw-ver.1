@@ -117,6 +117,11 @@ class PDFExporter:
         mat_str = _sanitize_pdf_text(specimen.material)
         spec_id_str = _sanitize_pdf_text(specimen.specimen_id)
 
+        if result.ext_enabled:
+            ext_type_label = "mV type (analog mV/V)" if result.ext_type == "MV" else "Pulse type (encoder)"
+        else:
+            ext_type_label = "Not used (crosshead displacement)"
+
         info_table_data = [
             [
                 Paragraph("<b>Test Date</b>", body_style), Paragraph(test_date_str, body_style),
@@ -133,8 +138,17 @@ class PDFExporter:
             [
                 Paragraph("<b>Cross-section (A0)</b>", body_style), Paragraph(f"{result.area_mm2:.3f} mm²", body_style),
                 Paragraph("<b>Test Speed</b>", body_style), Paragraph(f"{config.test_speed_mm_min} mm/min", body_style)
+            ],
+            [
+                Paragraph("<b>Extensometer</b>", body_style), Paragraph(ext_type_label, body_style),
+                Paragraph("<b>Strain Source</b>", body_style), Paragraph(result.strain_source, body_style)
             ]
         ]
+        if result.ext_enabled:
+            info_table_data.append([
+                Paragraph("<b>Extensometer GL</b>", body_style), Paragraph(f"{result.ext_gauge_length_mm:.1f} mm", body_style),
+                Paragraph("<b>Ext. Max Travel</b>", body_style), Paragraph(f"{result.ext_max_disp_mm:.3f} mm", body_style)
+            ])
 
         info_table = Table(info_table_data, colWidths=[38 * mm, 52 * mm, 38 * mm, 52 * mm])
         info_table.setStyle(TableStyle([
@@ -195,6 +209,13 @@ class PDFExporter:
                 Paragraph("Integrated Area Under Curve", body_style)
             ]
         ]
+
+        if result.ext_enabled:
+            results_data.insert(7, [
+                Paragraph("Extensometer Travel at Break", body_style), Paragraph("dL_ext", body_style),
+                Paragraph(f"{result.ext_break_disp_mm:.3f}", body_bold), Paragraph("mm", body_style),
+                Paragraph("Extensometer Measurement", body_style)
+            ])
 
         res_table = Table(results_data, colWidths=[55 * mm, 20 * mm, 32 * mm, 18 * mm, 55 * mm])
         res_table.setStyle(TableStyle([
