@@ -63,10 +63,13 @@ from core.i18n import TRANSLATIONS, tr, step_action_label, metric_label
 from core.session import BATCH_METRICS, SpecimenSession
 from core.history import TestHistoryStore
 from core.sequence import SequenceProgram, StepAction
+from core.command_assistant import CommandAssistant, TestCommandPlan, material_label
+from core.auto_export import AUTO_REPORT_DIR, display_path, export_auto_reports
 from exporters.excel_exporter import ExcelExporter
 from exporters.pdf_exporter import PDFExporter
 from ui.styles import HYUNDAI_THEME_QSS
 from ui.dialogs import SequenceDialog, HistoryDialog, mode_display
+from ui.assistant_panel import TestAssistantPanel
 
 
 class CommunicateBridge(QObject):
@@ -113,6 +116,10 @@ class MainWindow(QMainWindow):
         self._last_tracking: str = ""
         self.simulator = VirtualUTMSimulator()
         self.serial_driver = SerialUTMDriver()
+        # 빠른 시험 어시스턴트가 자동 저장하는 폴더 (시험 완료 시 Excel + PDF)
+        self.auto_report_dir = AUTO_REPORT_DIR
+        self._assistant_auto_export = False
+        self._active_specimen: Optional[Specimen] = None
         # PID 게인은 한 곳에서 관리한다 (화면에서 저장하면 가상·실장비 모두 반영)
         self.simulator.pid_manager = self.pid_manager
         self.serial_driver.pid_manager = self.pid_manager
@@ -347,13 +354,38 @@ class MainWindow(QMainWindow):
         self.chk_live_speed.setText(t["ctl_live_speed"])
         self.chk_live_speed.setToolTip(t["ctl_live_help"])
 
+        # 빠른 시험 어시스턴트
+        self.asst_group.setTitle(t["asst_group"])
+        self.asst_edit.setPlaceholderText(t["asst_placeholder"])
+        self.btn_asst_open.setText(t["asst_open"])
+        for index, button in enumerate(self.asst_example_buttons, start=1):
+            button.setText(t[f"asst_example_{index}_label"])
+            button.setToolTip(t[f"asst_example_{index}"])
+        self.assistant_panel.retranslate(lang)
+
         # Preferences Tab
         self._apply_preferences_language(t)
 
+        # 언어를 바꾸면 그래프 축 라벨도 바로 갱신한다
+        if hasattr(self, "plot_widget"):
+            self._replot_graph()
+
     def _create_dashboard_tab(self) -> QWidget:
         tab = QWidget()
-        layout = QHBoxLayout(tab)
-        layout.setContentsMargins(8, 8, 8, 8)
+        outer = QVBoxLayout(tab)
+        outer.setContentsMargins(8, 8, 8, 8)
+        outer.setSpacing(8)
+
+        # A. 빠른 시험 어시스턴트 (명령 입력 + 세팅 카드)
+        outer.addWidget(self._create_assistant_bar())
+        self.assistant_panel = TestAssistantPanel(self.current_lang)
+        self.assistant_panel.start_requested.connect(self._assistant_start)
+        self.assistant_panel.cancel_requested.connect(self._assistant_cancel)
+        outer.addWidget(self.assistant_panel)
+
+        body = QWidget()
+        layout = QHBoxLayout(body)
+        layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(12)
 
         left_scroll = QScrollArea()
@@ -375,7 +407,160 @@ class MainWindow(QMainWindow):
         self.dash_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.dash_scroll.setWidget(right_panel)
         layout.addWidget(self.dash_scroll, stretch=1)
+
+        outer.addWidget(body, stretch=1)
         return tab
+
+    # ------------------------------------------------------------------
+    # 빠른 시험 어시스턴트 (명령 입력 · 시편 세팅 카드 · 자동 시험/자동 출력)
+    # ------------------------------------------------------------------
+    def _create_assistant_bar(self) -> QGroupBox:
+        """대시보드 상단 명령 입력 바"""
+        self.asst_group = QGroupBox("빠른 시험 어시스턴트")
+        bar = QHBoxLayout(self.asst_group)
+        bar.setContentsMargins(10, 12, 10, 8)
+        bar.setSpacing(8)
+
+        self.asst_edit = QLineEdit()
+        self.asst_edit.setMinimumHeight(32)
+        self.asst_edit.returnPressed.connect(self._open_assistant_card)
+        bar.addWidget(self.asst_edit, stretch=1)
+
+        self.btn_asst_open = QPushButton("세팅 카드 열기")
+        self.btn_asst_open.setObjectName("btn_asst_open")
+        self.btn_asst_open.setMinimumWidth(136)
+        self.btn_asst_open.setMinimumHeight(32)
+        self.btn_asst_open.clicked.connect(self._open_assistant_card)
+        bar.addWidget(self.btn_asst_open)
+
+        # 빠른 예시 (북마크된 명령 문장을 그대로 넣는다)
+        self.asst_example_buttons: List[QPushButton] = []
+        for index in (1, 2, 3):
+            button = QPushButton()
+            button.setProperty("class", "asst-example")
+            button.setMinimumHeight(32)
+            button.clicked.connect(lambda _=False, i=index: self._use_assistant_example(i))
+            bar.addWidget(button)
+            self.asst_example_buttons.append(button)
+        return self.asst_group
+
+    def _use_assistant_example(self, index: int):
+        t = TRANSLATIONS[self.current_lang]
+        self.asst_edit.setText(t.get(f"asst_example_{index}", ""))
+        self._open_assistant_card()
+
+    def _open_assistant_card(self, *_):
+        """입력한 명령을 해석해 시편 세팅 카드를 펼친다 (시험은 아직 시작하지 않는다)"""
+        text = self.asst_edit.text().strip()
+        t = TRANSLATIONS[self.current_lang]
+        if not text:
+            self.asst_edit.setFocus()
+            self.statusBar().showMessage(t["asst_placeholder"])
+            return
+        if getattr(self.active_driver, "is_running", False):
+            self.statusBar().showMessage(t["asst_busy"])
+            return
+        self._assistant_auto_export = False
+        plan = CommandAssistant.parse(text, self.current_lang)
+        self.assistant_panel.set_plan(
+            plan, self.edit_specimen_id.text().strip(), display_path(self.auto_report_dir))
+        self.asst_edit.setText(text)
+
+    def _assistant_cancel(self):
+        self.assistant_panel.reset()
+        self._assistant_auto_export = False
+
+    def _assistant_start(self):
+        """작업자가 [시편 세팅 완료 · 시험 시작]을 누른 순간에만 시험을 시작한다"""
+        panel = self.assistant_panel
+        plan = panel.plan
+        if plan is None:
+            return
+        if getattr(self.active_driver, "is_running", False):
+            self.statusBar().showMessage(TRANSLATIONS[self.current_lang]["asst_busy"])
+            return
+        errors = panel.validation_errors()
+        if errors:
+            panel.flag_missing(errors)
+            self.statusBar().showMessage(TRANSLATIONS[self.current_lang]["asst_enter_hint"])
+            return
+
+        self._apply_assistant_plan(plan, panel.values())
+        self._assistant_auto_export = panel.auto_export_enabled()
+        panel.set_specimen_id(self.edit_specimen_id.text().strip())
+        panel.mark_running()
+        self._start_test()
+
+    def _apply_assistant_plan(self, plan: TestCommandPlan, values: dict):
+        """해석한 계획을 좌측 시험 설정 폼에 그대로 채운다"""
+        radios = {
+            TestMode.TENSILE: self.rb_tensile,
+            TestMode.COMPRESSION: self.rb_compression,
+            TestMode.BENDING: self.rb_bending,
+            TestMode.HOLDING: self.rb_holding,
+            TestMode.SEQUENCE: self.rb_sequence,
+        }
+        radios.get(plan.mode, self.rb_tensile).setChecked(True)
+
+        self.edit_material.setText(material_label(plan.material_code, self.current_lang))
+
+        is_round = values["specimen_type"] is SpecimenType.ROUND
+        self.combo_type.setCurrentIndex(1 if is_round else 0)
+        self._on_specimen_type_changed(1 if is_round else 0)
+        self.spin_width.setValue(values["diameter"] if is_round else values["width"])
+        if not is_round:
+            self.spin_thick.setValue(values["thickness"])
+        self.spin_l0.setValue(values["gauge_length"])
+
+        if plan.mode is TestMode.BENDING:
+            self.combo_bend_type.setCurrentIndex(
+                0 if plan.bending_type == BendingType.THREE_POINT else 1)
+            self.spin_span.setValue(values["span_length"])
+
+        if plan.mode is TestMode.HOLDING:
+            self.combo_hold_type.setCurrentIndex(
+                0 if plan.holding_type == HoldingType.LOAD_HOLD else 1)
+            self.spin_hold_val.setValue(plan.target_holding_val)
+            self.spin_hold_dur.setValue(plan.holding_duration_s)
+
+        self.spin_speed.setValue(plan.test_speed_mm_min)
+        control_index = {
+            ControlMode.DISP.value: 0,
+            ControlMode.LOAD_RATE.value: 1,
+            ControlMode.STRESS_RATE.value: 2,
+            ControlMode.LOAD_HOLD.value: 3,
+        }.get(str(plan.control_mode).upper(), 0)
+        self.combo_control_mode.setCurrentIndex(control_index)
+        if plan.uses_pid and plan.target_rate > 0:
+            self.spin_target_rate.setValue(plan.target_rate)
+        pid_index = self.combo_pid_mode.findData(plan.pid_profile_id)
+        if pid_index >= 0:
+            self.combo_pid_mode.setCurrentIndex(pid_index)
+        # 하중 유지 선택이 시험 종류 라디오를 바꿔 놓았을 수 있으므로 다시 맞춘다
+        radios.get(plan.mode, self.rb_tensile).setChecked(True)
+
+    def _finish_assistant_export(self, specimen: Specimen, config: TestConfig) -> tuple:
+        """시험 완료 후 로우데이터(Excel) · 성적서(PDF) 자동 저장"""
+        paths: dict = {}
+        error = ""
+        try:
+            paths = export_auto_reports(
+                specimen, config, self.current_result, self.data_points,
+                lang=self.current_lang, out_dir=self.auto_report_dir)
+        except Exception as exc:  # 저장 실패가 시험 결과 표시를 막지 않는다
+            error = str(exc)
+            print(f"[MainWindow] 자동 저장 실패: {exc}")
+
+        panel = self.assistant_panel
+        if paths:
+            panel.mark_completed(paths, self.current_result.peak_load_n,
+                                 self.current_result.peak_stress_mpa, specimen.specimen_id)
+        elif error:
+            panel.mark_export_failed(error)
+        else:
+            panel.mark_completed({}, self.current_result.peak_load_n,
+                                 self.current_result.peak_stress_mpa, specimen.specimen_id)
+        return paths, error
 
     def _create_left_panel(self) -> QWidget:
         panel = QWidget()
@@ -1826,6 +2011,12 @@ class MainWindow(QMainWindow):
 
         specimen = self._get_current_specimen()
         config = self._get_current_config()
+        self._active_specimen = specimen
+        # 어시스턴트 카드가 열린 채로 좌측 [시험 시작]을 누르면 카드는 닫는다
+        if getattr(self, "assistant_panel", None) is not None \
+                and self.assistant_panel.state in ("plan", "done"):
+            self.assistant_panel.reset()
+            self._assistant_auto_export = False
 
         t = TRANSLATIONS[self.current_lang]
         if config.mode == TestMode.SEQUENCE and not config.sequence.is_valid():
@@ -1964,7 +2155,20 @@ class MainWindow(QMainWindow):
         msg = t["status_done"].format(reason=reason, count=len(self.data_points))
         self.statusBar().showMessage(msg)
 
-        # 3) 시편 번호 자동 증가 (배치 연속 시험)
+        # 3) 어시스턴트로 시작한 시험이면 로우데이터(Excel) · 성적서(PDF) 자동 저장
+        export_paths: dict = {}
+        export_error = ""
+        if self._assistant_auto_export:
+            export_paths, export_error = self._finish_assistant_export(specimen, config)
+            self._assistant_auto_export = False
+        elif getattr(self, "assistant_panel", None) is not None \
+                and self.assistant_panel.state == "running":
+            # 자동 저장을 끄고 시작한 경우에도 카드는 완료 상태로 닫는다
+            self.assistant_panel.mark_completed({}, self.current_result.peak_load_n,
+                                                self.current_result.peak_stress_mpa,
+                                                specimen.specimen_id)
+
+        # 4) 시편 번호 자동 증가 (배치 연속 시험)
         if self.chk_auto_id.isChecked():
             self._next_specimen_id()
 
@@ -1983,6 +2187,11 @@ class MainWindow(QMainWindow):
         ]
         if self.current_result.sequence_steps:
             lines.append(f"시퀀스: {self.current_result.sequence_name or '-'}")
+        if export_paths:
+            lines.append(f"로우데이터(Excel): {os.path.normpath(export_paths.get('excel', ''))}")
+            lines.append(f"성적서(PDF): {os.path.normpath(export_paths.get('pdf', ''))}")
+        elif export_error:
+            lines.append(f"자동 저장 실패: {export_error}")
         if self._last_tracking:
             lines.append(self._last_tracking)
         QMessageBox.information(self, "시험 완료", "시험이 완료되었습니다.\n" + "\n".join(lines))

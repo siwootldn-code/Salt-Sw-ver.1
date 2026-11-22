@@ -52,6 +52,12 @@
    - 시험 초반에 측정한 **시편 강성 k = ΔF/Δx(N/mm)** 로 기준 변위 속도를 환산하는 **피드포워드** + 남은 오차만 보정하는 **Soft-PID**
    - 통신 지연 20~50 ms · 제어 주기 20~50 Hz 조건에서도 오버슈트를 억제하도록 **목표 근접 감속 · Anti-Windup · 속도 변화율 제한** 적용
    - 실시간 속도 변경(SPD)이 확인되지 않은 인디케이터에서는 **초기 강성 환산 고정 속도로 자동 폴백**
+11. **빠른 시험 어시스턴트 — 명령 한 줄로 시험 준비와 자동 출력 (Quick Test Assistant)**
+   - 대시보드 상단 명령창에 `인장시험으로 시험해줘` 처럼 입력하면 시험 종류·적용 규격·재질·제어 방식·권장 속도를 먼저 잡고, 빠진 시편 치수는 카드에서 **입력 필요**로 표시
+   - `SUS304 판재 12.5x3.2 표점 50 인장 5mm/min` 처럼 치수까지 말하면 카드가 전부 채워진 상태로 열림 (한국어·영문 지원)
+   - 인터넷·유료 API 없이 동작하는 규칙 기반 해석 — 재질(SS400·SUS304·AL6061·ABS·NBR 등), 형상(판재·봉재), 치수, 제어 방식(변위·하중 속도·응력 속도·하중 유지), PID 프로필을 읽음
+   - 작업자가 시편을 장착한 뒤 **[시편 세팅 완료 · 시험 시작]** 을 눌러야만 축이 움직임 (자동 시작 없음)
+   - 시험이 끝나면 **로우데이터(Excel)와 성적서(PDF)** 를 `output/auto_reports/{YYYYMMDD_HHMMSS}_{시험명}_{시편}.xlsx/.pdf` 로 자동 저장하고 실제 저장 경로를 카드에 표시
 
 ---
 
@@ -72,6 +78,8 @@ salt-sw-v1/
 │   ├── serial_driver.py       # 봉신 P2020/P2014 RS-232 드라이버 (신율계 채널 선택 파싱)
 │   ├── calibration.py         # 하중/속도/변위 정밀 교정 관리자
 │   ├── i18n.py                # 한/영 UI 문자열
+│   ├── command_assistant.py   # 오프라인 자연어 시험 명령 해석 (시험 종류·재질·치수·제어·권장 속도)
+│   ├── auto_export.py         # 시험 완료 자동 출력 (로우데이터 Excel + 성적서 PDF)
 │   └── hardware_interface.py  # 실제 장비 연동용 추상 하드웨어 인터페이스
 ├── exporters/
 │   ├── __init__.py
@@ -80,15 +88,17 @@ salt-sw-v1/
 ├── ui/
 │   ├── __init__.py
 │   ├── main_window.py         # PyQt6 기반 전문 UTM 대시보드 윈도우 + 환경 설정 탭
+│   ├── assistant_panel.py     # 빠른 시험 어시스턴트 시편 세팅 카드
 │   ├── dialogs.py             # 시퀀스 편집 창 · 시험 이력(무결성) 창
 │   └── styles.py              # 산업용 고시인성 테마 QSS
-├── tests/                     # 신율계·환경설정·오버레이·이력·시퀀스·소프트 PID 자동 검증 (unittest/pytest, 141개)
+├── tests/                     # 신율계·환경설정·오버레이·이력·시퀀스·소프트 PID·빠른 시험 어시스턴트 자동 검증 (unittest/pytest, 165개)
 ├── tools/capture_ui.py        # offscreen UI 스크린샷 생성 스크립트
+├── tools/capture_assistant.py # 빠른 시험 어시스턴트 4단계 스크린샷 생성
 ├── tools/capture_pid_ui.py    # 소프트 PID 제어 화면 스크린샷 생성
 ├── tools/pid_benchmark.py     # 재질 3종 PID vs 고정 속도 추종 성능 측정·그래프
 ├── docs/screenshots/          # UI 검증 스크린샷
 ├── history/                   # 시험 이력 자동 저장 폴더 (실행 시 생성, JSON + SHA-256)
-├── output/                    # 엑셀 및 PDF 결과물 저장 디렉토리
+├── output/                    # 엑셀 및 PDF 결과물 저장 디렉토리 (auto_reports/ 자동 출력)
 ├── cli_demo.py                # 터미널 즉시 실행 및 기능 검증 데모 스크립트
 ├── main.py                    # GUI 메인 애플리케이션 실행 파일
 ├── requirements.txt           # 필수 패키지 목록
@@ -141,8 +151,29 @@ python -m unittest discover -s tests -v
 python -m unittest tests.test_overlay_history_sequence -v   # 오버레이 · 이력 · 시퀀스 (핵심 로직)
 python -m unittest tests.test_ui_overlay -v                 # 화면 연동 (세션 · 통계 · 이력 · 시퀀스)
 python -m unittest tests.test_pid_controller -v             # 소프트 PID 제어 (게인·피드포워드·추종 성능)
+python -m unittest tests.test_command_assistant -v          # 빠른 시험 어시스턴트 (명령 해석 · 자동 저장 · 화면 연동)
 python3 tools/pid_benchmark.py                              # 재질 3종 PID vs 고정 속도 성능 측정
 ```
+
+---
+
+## ⚡ 빠른 시험 어시스턴트 (Quick Test Assistant)
+
+대시보드 맨 위 명령창에 시험을 한 줄로 적으면, 프로그램이 시험 조건을 잡아 **시편 세팅 확인 카드**로 보여 줍니다.
+작업자가 시편을 장착하고 **[시편 세팅 완료 · 시험 시작]** 을 눌러야 시험이 시작됩니다.
+
+| 명령 예 | 해석 결과 |
+| --- | --- |
+| `인장시험으로 시험해줘` | 인장 시험 · SS400 · 5 mm/min, 폭·두께·표점거리는 **입력 필요** |
+| `SUS304 판재 12.5x3.2 표점 50 인장 5mm/min` | 모든 치수가 채워진 카드 (그대로 시작 가능) |
+| `NBR 봉재 직경 10 압축 50mm/min` | 압축 시험 · 봉재 · 직경 10 · PID 1(연질) · 표점거리 입력 필요 |
+| `AL6061 4점 굽힘 폭 12.5 두께 3 지간 100 2mm/min` | 4점 굽힘 · 지간 100 |
+| `SUS304 판재 12.5x3.2 표점 50 인장 하중 속도 6000 N/min` | 하중 속도 제어 · PID 자동 선택 |
+| `SS400 판재 12.5x3.2 표점 50 하중 유지 1000N 60초` | 유지 시험 (크리프) |
+
+- 카드에서 **[x] 시험 완료 후 로우데이터(Excel) + 성적서(PDF) 자동 저장** 을 끄면 저장 없이 시험만 합니다.
+- 시험이 끝나면 `output/auto_reports/` 에 두 파일이 남고, 카드에 저장된 경로가 그대로 표시됩니다.
+- 명령은 인터넷 없이 규칙 기반으로 해석합니다. 알아듣지 못한 항목은 기본값으로 채우되 **카드에 그 이유를 적고** 치수는 비워 둡니다.
 
 ---
 
@@ -310,8 +341,13 @@ class SerialUTMHardware(HardwareInterface):
 | `15_history_dialog_ko.png` | 시험 이력 창 — 무결성/체인 검증 결과 |
 | `15b_history_dialog_en.png` | 영문 UI 시험 이력 창 |
 | `16_overlay_min_size_ko.png` | 최소 창 크기(1120x740)에서 겹침 없이 스크롤되는 레이아웃 |
+| `19_assistant_step1_card_ko.png` | 빠른 시험 어시스턴트 — 명령 입력 후 시편 세팅 확인 카드 (치수 미입력 강조) |
+| `20_assistant_step2_running_ko.png` | 치수 입력 → [시편 세팅 완료 · 시험 시작] → 실시간 시험 진행 |
+| `21_assistant_step3_exported_ko.png` | 시험 완료 — 로우데이터(Excel)·성적서(PDF) 자동 저장 경로 표시 |
+| `22_assistant_step4_card_en.png` | 영문(EN) 화면의 어시스턴트 카드 |
 
 스크린샷 재생성: `QT_QPA_PLATFORM=offscreen python tools/capture_ui.py`
+어시스턴트 4단계: `QT_QPA_PLATFORM=offscreen python tools/capture_assistant.py`
 
 ---
 

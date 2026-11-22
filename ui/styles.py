@@ -226,6 +226,35 @@ QPushButton#btn_stop:disabled {
     border-color: #E2E8F0;
 }
 
+/* 빠른 시험 어시스턴트 - 세팅 카드 열기 / 예시 버튼 */
+QPushButton#btn_asst_open {
+    background-color: #1D4ED8;
+    color: #FFFFFF;
+    border: 1px solid #1E40AF;
+    font-weight: 700;
+    font-size: 9.5pt;
+    min-height: 30px;
+}
+
+QPushButton#btn_asst_open:hover {
+    background-color: #1E40AF;
+}
+
+QPushButton[class="asst-example"] {
+    background-color: #F8FAFC;
+    color: #334155;
+    border: 1px solid #E2E8F0;
+    font-size: 8.5pt;
+    font-weight: 600;
+    padding: 4px 10px;
+}
+
+QPushButton[class="asst-example"]:hover {
+    background-color: #EFF6FF;
+    border-color: #BFDBFE;
+    color: #1D4ED8;
+}
+
 /* 대형 디지털 계측 타일 (Instron Bluehill Style Readout) */
 QFrame[class="readout-tile"] {
     background-color: #FFFFFF;

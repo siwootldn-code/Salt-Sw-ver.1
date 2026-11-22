@@ -36,3 +36,6 @@ pid_profiles.json
 
 # 시험 이력 자동 저장 폴더 (현장 데이터)
 history/
+
+# 빠른 시험 어시스턴트 자동 출력물 (시험마다 새로 생성)
+output/auto_reports/
