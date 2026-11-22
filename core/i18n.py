@@ -275,6 +275,36 @@ TRANSLATIONS = {
         "hist_step_outcome": "결과",
 
         # Status Bar
+
+        # 제어 방식 및 소프트 PID
+        "ctl_group": "제어 방식 및 PID",
+        "ctl_mode": "제어 방식:",
+        "ctl_mode_disp": "변위 속도 (mm/min)",
+        "ctl_mode_load": "하중 속도 (N/min)",
+        "ctl_mode_stress": "응력 속도 (MPa/s)",
+        "ctl_mode_hold": "하중 유지 (N)",
+        "ctl_rate_load": "목표 하중 속도:",
+        "ctl_rate_stress": "목표 응력 속도:",
+        "ctl_rate_hold": "접근 하중 속도:",
+        "ctl_rate_disp": "시험 속도:",
+        "ctl_pid_mode": "PID 모드:",
+        "ctl_gains": "게인:",
+        "ctl_save_gains": "게인 저장",
+        "ctl_gains_saved": "{name} 게인을 저장했습니다.",
+        "ctl_hint": "게인은 추정 강성으로 환산한 변위 오차 기준입니다. 통신 주기(20~50 Hz)보다 빠른 응답은 제어하지 않습니다.",
+        "ctl_delay": "지연 (ms):",
+        "ctl_rate": "주기 (Hz):",
+        "ctl_status": "제어 상태:",
+        "ctl_status_idle": "대기 중",
+        "ctl_live_speed": "시험 중 실시간 속도 변경 지원 (SPD 명령)",
+        "ctl_live_help": "인디케이터가 시험 중 SPD 명령을 받는 것이 확인된 경우에만 켭니다. 끄면 초기 강성으로 환산한 속도를 한 번만 넣습니다.",
+        "ctl_hold_needs_mode": "하중 유지는 유지 시험 모드에서만 동작합니다.",
+        "pid_src_measure": "실측",
+        "pid_src_prior": "재질 추정",
+        "pid_src_none": "없음",
+        "ctl_result": "추종 오차 {follow:.1f}% · 오버슈트 {over:.1f}% · 유지 오차 {hold:.1f}%",
+
+        # Status Bar
         "status_ready": "장비 상태: 대기 중 | 가상 시뮬레이터 모드",
         "status_running": "시험 진행 중... [모드: {mode}, 시편: {specimen}]",
         "status_done": "시험 완료: {reason} | 총 계측점: {count}개",
@@ -550,6 +580,36 @@ TRANSLATIONS = {
         "hist_step_end": "End (s)",
         "hist_step_load": "End Load (N)",
         "hist_step_outcome": "Outcome",
+
+        # Status Bar
+
+        # Control method and soft PID
+        "ctl_group": "Control Method and PID",
+        "ctl_mode": "Method:",
+        "ctl_mode_disp": "Displacement rate (mm/min)",
+        "ctl_mode_load": "Load rate (N/min)",
+        "ctl_mode_stress": "Stress rate (MPa/s)",
+        "ctl_mode_hold": "Load hold (N)",
+        "ctl_rate_load": "Load rate:",
+        "ctl_rate_stress": "Stress rate:",
+        "ctl_rate_hold": "Approach rate:",
+        "ctl_rate_disp": "Test speed:",
+        "ctl_pid_mode": "PID mode:",
+        "ctl_gains": "Gains:",
+        "ctl_save_gains": "Save Gains",
+        "ctl_gains_saved": "Saved {name} gains.",
+        "ctl_hint": "Gains apply to displacement error scaled by the estimated stiffness. Response faster than the serial packet rate (20-50 Hz) is not controlled.",
+        "ctl_delay": "Delay (ms):",
+        "ctl_rate": "Rate (Hz):",
+        "ctl_status": "Status:",
+        "ctl_status_idle": "Idle",
+        "ctl_live_speed": "Live speed change during test (SPD command)",
+        "ctl_live_help": "Enable only when the indicator is confirmed to accept SPD commands during a test. When off, one fixed speed from the initial stiffness is used.",
+        "ctl_hold_needs_mode": "Load hold works with the holding test mode.",
+        "pid_src_measure": "measured",
+        "pid_src_prior": "material estimate",
+        "pid_src_none": "none",
+        "ctl_result": "Tracking error {follow:.1f}% · overshoot {over:.1f}% · hold error {hold:.1f}%",
 
         # Status Bar
         "status_ready": "Machine Status: READY | Virtual Simulator Mode",

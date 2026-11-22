@@ -20,7 +20,13 @@ except ImportError:
 from .hardware_interface import HardwareInterface
 from .models import DataPoint, ExtensometerSettings, TestConfig, Specimen, TestMode
 from .calibration import CalibrationManager
-from .sequence import SequenceController, SequenceProgram, StepAction
+from .pid_controller import (
+    ControlMode, PIDProfileManager, SoftPIDController, TrackingSample, build_controller
+)
+from .sequence import (
+    SequenceCommand, SequenceController, SequenceProgram, StepAction,
+    format_sequence_command
+)
 
 
 class SerialUTMDriver(HardwareInterface):
@@ -65,12 +71,25 @@ class SerialUTMDriver(HardwareInterface):
         self.ext_unit_multiplier: float = 1.0   # 기본: mm
         self.last_raw_ext: float = 0.0
         self.ext_signal_lost: bool = False      # 신율계 사용 설정인데 채널 신호가 없음
+        self.disp_channel_present: bool = True  # 패킷에 변위 필드가 있는지 (강성 추정에 필요)
 
         # 다단계 시퀀스 상태 (RS-232 소프트웨어 오케스트레이션)
         self.sequence_ctl: Optional[SequenceController] = None
         self.sequence_commands: List[str] = []   # 실제 전송한 명령 기록
         self._seq_peak_load: float = 0.0
         self._seq_fractured: bool = False
+
+        # 소프트 PID 하중·응력 속도 제어 상태
+        # supports_live_speed_control: 시험 중 SPD 명령을 받는지 여부.
+        # 봉신 P2020 / P2014 매뉴얼로 확인되기 전까지는 미지원(False)으로 두고,
+        # 초기 강성으로 환산한 고정 속도를 한 번만 넣는 방식으로 운전한다.
+        self.supports_live_speed_control: bool = False
+        self.pid_manager = PIDProfileManager()
+        self.controller: Optional[SoftPIDController] = None
+        self.control_trace: List[TrackingSample] = []
+        self._ctrl_last_t: float = 0.0
+        self._last_sent_speed: float = 0.0
+        self._fixed_speed_sent: bool = False
 
     # ------------------------------------------------------------------
     def set_sequence(self, program: Optional[SequenceProgram]):
@@ -178,6 +197,21 @@ class SerialUTMDriver(HardwareInterface):
             self.sequence_ctl = SequenceController(config.sequence)
             self.sequence_name = config.sequence.name
 
+        # 소프트 PID 하중·응력 속도 제어 준비
+        self.controller = None
+        self.control_trace = []
+        self._ctrl_last_t = 0.0
+        self._last_sent_speed = 0.0
+        self._fixed_speed_sent = False
+        if getattr(config, "uses_pid_control", False):
+            self.controller = build_controller(config, specimen, self.pid_manager)
+            if self.controller is not None:
+                # 기준 속도를 초기 강성으로 환산해 두고, 첫 패킷에서 바로 사용한다
+                ff = self.controller.feedforward_speed_mm_min
+                if ff > 0 and self.supports_live_speed_control and config.live_speed_control:
+                    self.set_speed(ff)
+                    self.send_command(format_sequence_command(SequenceCommand.RUN))
+
         # 시작 시 현재 값을 영점으로 자동 보정
         self.tare_load()
         self.tare_displacement()
@@ -197,6 +231,23 @@ class SerialUTMDriver(HardwareInterface):
     def return_to_origin(self):
         """원점 복귀 (하드웨어 제어 지원 시 명령 송신)"""
         self.send_command("ORIGIN\r\n")
+
+    # ------------------------------------------------------------------
+    def set_speed(self, speed_mm_min: float):
+        """
+        시험 중 속도 변경 (지원 여부와 관계없이 명령은 보내고 기록한다).
+        하중 제어에서는 1 mm/min 미만의 느린 속도를 쓰므로 소수 4자리까지 보낸다.
+        """
+        speed = float(speed_mm_min)
+        self._last_sent_speed = speed
+        text = f"SPD {speed:.4f}" if abs(speed) < 1.0 else f"SPD {speed:.2f}"
+        self.send_command(text + "\r\n")
+
+    def current_control_status(self, lang: str = "KO") -> str:
+        """소프트 PID 제어 상태 표시 문자열"""
+        if self.controller is None:
+            return ""
+        return self.controller.status_text(lang)
 
     def tare_load(self):
         """현재 하중을 0으로 세팅 (Zero/Tare)"""
@@ -272,7 +323,7 @@ class SerialUTMDriver(HardwareInterface):
                 dp = self._parse_packet(line)
                 if dp and self.is_running and self.on_data_received:
                     self.on_data_received(dp)
-                    finished = self._sequence_tick(dp)
+                    finished = self._sequence_tick(dp) or self._control_tick(dp)
                     if finished:
                         self.is_running = False
                         self.sequence_ctl = None
@@ -308,7 +359,9 @@ class SerialUTMDriver(HardwareInterface):
                 return None
 
             raw_load = float(numbers[0])
-            raw_disp = float(numbers[1]) if len(numbers) >= 2 else (current_time * (self.config.test_speed_mm_min / 60.0) if self.config else 0.0)
+            self.disp_channel_present = len(numbers) >= 2
+            raw_disp = float(numbers[1]) if self.disp_channel_present else (
+                current_time * (self.config.test_speed_mm_min / 60.0) if self.config else 0.0)
 
             self.last_raw_load = raw_load
             self.last_raw_disp = raw_disp
@@ -388,4 +441,105 @@ class SerialUTMDriver(HardwareInterface):
 
         if len(numbers) >= 3:
             return float(numbers[2])
+        return None
+
+    # ------------------------------------------------------------------
+    # 다단계 시퀀스 · 소프트 PID 제어 진행 처리
+    # ------------------------------------------------------------------
+    def _now(self) -> float:
+        """시험 시작 기준 경과 시간 (초)"""
+        return time.time() - self.start_time if self.start_time > 0 else 0.0
+
+    def _seq_apply(self, transitions) -> List[str]:
+        """단계 전환을 실제 명령 문자열로 바꾸고 전송 기록에 남긴다"""
+        lines: List[str] = []
+        for transition in transitions or []:
+            for line in transition.command_lines():
+                lines.append(line)
+                self.sequence_commands.append(line.strip())
+        return lines
+
+    def _sequence_tick(self, dp: DataPoint) -> Optional[str]:
+        """
+        다단계 시퀀스 단계 진행 판정.
+        목표(하중/변위/시간) 도달 시 다음 단계 명령을 보내고,
+        시퀀스가 끝나면 완료 사유를 돌려준다.
+        """
+        ctl = self.sequence_ctl
+        if ctl is None:
+            return None
+
+        # 파단 감지 (피크 대비 하중 하락)
+        drop_ratio = self.config.fracture_drop_ratio if self.config else 0.5
+        if dp.load_n > self._seq_peak_load:
+            self._seq_peak_load = dp.load_n
+        elif self._seq_peak_load > 50 and \
+                dp.load_n < self._seq_peak_load * (1.0 - drop_ratio):
+            self._seq_fractured = True
+
+        if not ctl.is_started:
+            for line in self._seq_apply(ctl.start(dp.time_s, dp.load_n, dp.displacement_mm)):
+                self.send_command(line)
+            return None
+
+        transitions = ctl.update(dp.time_s, dp.load_n, dp.displacement_mm,
+                                 fractured=self._seq_fractured)
+        for line in self._seq_apply(transitions):
+            self.send_command(line)
+
+        if ctl.is_finished:
+            self.step_events = ctl.events_as_dicts()
+            return "시퀀스 완료 · 파단 감지" if self._seq_fractured else "시퀀스 완료 · 정상 종료"
+        return None
+
+    def _control_tick(self, dp: DataPoint) -> Optional[str]:
+        """
+        소프트 PID 제어 1주기.
+        실시간 속도 변경이 가능하면 매 주기 SPD 를 갱신하고,
+        미지원이면 초기 강성으로 환산한 고정 속도를 한 번만 보낸다.
+        """
+        ctrl = self.controller
+        if ctrl is None:
+            return None
+
+        period = 1.0 / max(1.0, ctrl.control_rate_hz)
+        if self._ctrl_last_t > 0 and dp.time_s - self._ctrl_last_t < period:
+            return None
+        dt = dp.time_s - self._ctrl_last_t if self._ctrl_last_t > 0 else period
+        self._ctrl_last_t = dp.time_s
+
+        speed = ctrl.update(dt, dp.load_n, dp.displacement_mm,
+                            disp_valid=self.disp_channel_present)
+        live = self.supports_live_speed_control and ctrl.live_speed_control
+        if live:
+            if abs(speed - self._last_sent_speed) >= 0.001:
+                self.set_speed(speed)
+        elif not self._fixed_speed_sent:
+            ff = ctrl.feedforward_speed_mm_min
+            if ff > 0:
+                self.set_speed(ff)
+                self.send_command(format_sequence_command(SequenceCommand.RUN))
+                self._fixed_speed_sent = True
+                print(f"[SerialUTMDriver] 고정 속도 운전: 강성 {ctrl.stiffness_n_per_mm:,.0f} N/mm "
+                      f"→ {ff:.4f} mm/min")
+
+        self.control_trace.append(TrackingSample(
+            time_s=round(dp.time_s, 3),
+            setpoint_n=round(ctrl.setpoint_load_n, 2),
+            load_n=round(dp.load_n, 2),
+            speed_mm_min=round(self._last_sent_speed, 3),
+            stiffness_n_per_mm=round(ctrl.stiffness_n_per_mm, 1),
+        ))
+
+        # 하중 유지: 목표 도달 · 유지 시간 종료 · 과하중 안전 정지
+        if ctrl.mode is ControlMode.LOAD_HOLD and ctrl.target_load_n > 0:
+            if ctrl.is_finished:
+                self.send_command(format_sequence_command(SequenceCommand.STOP))
+                return "목표 하중 유지 완료"
+            if dp.load_n > ctrl.target_load_n * 1.2:
+                self.send_command(format_sequence_command(SequenceCommand.STOP))
+                return "과하중 안전 정지 (목표 20% 초과)"
+            if not live and dp.load_n >= ctrl.target_load_n:
+                self.send_command(format_sequence_command(SequenceCommand.STOP))
+                return "목표 하중 도달 (고정 속도 · 실시간 보정 없음)"
         return None

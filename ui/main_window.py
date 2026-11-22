@@ -56,6 +56,9 @@ from core.serial_driver import SerialUTMDriver
 from core.hardware_interface import HardwareInterface
 from core.calculator import MaterialCalculator
 from core.preferences import PreferencesManager
+from core.pid_controller import (
+    ControlMode, PIDProfileManager, evaluate_tracking
+)
 from core.i18n import TRANSLATIONS, tr, step_action_label, metric_label
 from core.session import BATCH_METRICS, SpecimenSession
 from core.history import TestHistoryStore
@@ -99,6 +102,7 @@ class MainWindow(QMainWindow):
         self.data_points: List[DataPoint] = []
         self.current_result: Optional[TestResult] = None
         self.prefs = PreferencesManager()
+        self.pid_manager = PIDProfileManager()
         self.session = SpecimenSession()
         self.history = TestHistoryStore()
         self.sequence_program: SequenceProgram = SequenceProgram.standard()
@@ -106,8 +110,12 @@ class MainWindow(QMainWindow):
         self._step_markers: List[object] = []
         self._live_record_seq: Optional[int] = None
         self._last_completion_reason: str = ""
+        self._last_tracking: str = ""
         self.simulator = VirtualUTMSimulator()
         self.serial_driver = SerialUTMDriver()
+        # PID 게인은 한 곳에서 관리한다 (화면에서 저장하면 가상·실장비 모두 반영)
+        self.simulator.pid_manager = self.pid_manager
+        self.serial_driver.pid_manager = self.pid_manager
         self.serial_driver.set_extensometer(self.prefs.ext)
         self.simulator.set_extensometer(self.prefs.ext)
         self.active_driver: HardwareInterface = self.simulator
@@ -123,6 +131,11 @@ class MainWindow(QMainWindow):
         self.serial_driver.on_data_received = lambda p: self.bridge.data_received.emit(p)
         self.serial_driver.on_test_completed = lambda reason: self.bridge.test_completed.emit(reason)
         self.serial_driver.on_raw_data_received = lambda raw: self.bridge.raw_data_received.emit(raw)
+
+        # 제어 상태 표시 갱신 타이머 (시험 중 0.25초 간격)
+        self.ctl_timer = QTimer(self)
+        self.ctl_timer.setInterval(250)
+        self.ctl_timer.timeout.connect(self._refresh_control_status)
 
         self._init_ui()
         self._apply_language(self.current_lang)
@@ -327,6 +340,13 @@ class MainWindow(QMainWindow):
         self.mon_group.setTitle(t["packet_title"])
         self.btn_clear_log.setText(t["btn_clear_log"])
 
+        # Control method / soft PID
+        self._apply_control_language(t)
+
+        # Hardware - 시험 중 실시간 속도 변경 지원
+        self.chk_live_speed.setText(t["ctl_live_speed"])
+        self.chk_live_speed.setToolTip(t["ctl_live_help"])
+
         # Preferences Tab
         self._apply_preferences_language(t)
 
@@ -343,6 +363,7 @@ class MainWindow(QMainWindow):
         
         left_content = self._create_left_panel()
         left_scroll.setWidget(left_content)
+        self.left_scroll = left_scroll
         layout.addWidget(left_scroll, stretch=0)
 
         # 오른쪽(계측 타일·그래프·세션·배치 통계·결과표)은 창 높이가 작을 때
@@ -534,6 +555,10 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(self.cond_group)
 
+        # C-2. 제어 방식 및 소프트 PID (하중 속도 · 응력 속도 · 하중 유지)
+        # 생성은 조건 그룹 뒤에서 하지만, 화면에는 시편 정보 다음에 놓는다.
+        layout.insertWidget(2, self._create_control_group())
+
         # D. 장비 조작 버튼
         self.ctrl_group = QGroupBox("장비 조작")
         ctrl_layout = QVBoxLayout(self.ctrl_group)
@@ -581,6 +606,199 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.export_group)
         layout.addStretch()
         return panel
+
+    # ------------------------------------------------------------------
+    # 제어 방식 및 소프트 PID
+    # ------------------------------------------------------------------
+    def _create_control_group(self) -> QGroupBox:
+        self.ctl_group = QGroupBox("제어 방식 및 PID")
+        grid = QGridLayout(self.ctl_group)
+        grid.setContentsMargins(10, 12, 10, 10)
+        grid.setSpacing(6)
+        grid.setColumnStretch(1, 1)
+        grid.setColumnStretch(2, 1)
+
+        self.lbl_ctl_mode = QLabel("제어 방식:")
+        self.combo_control_mode = QComboBox()
+        self.combo_control_mode.addItems([
+            "변위 속도 (mm/min)", "하중 속도 (N/min)",
+            "응력 속도 (MPa/s)", "하중 유지 (N)",
+        ])
+        self.combo_control_mode.currentIndexChanged.connect(self._on_control_mode_changed)
+        grid.addWidget(self.lbl_ctl_mode, 0, 0)
+        grid.addWidget(self.combo_control_mode, 0, 1, 1, 3)
+
+        self.lbl_target_rate = QLabel("목표 하중 속도:")
+        self.spin_target_rate = QDoubleSpinBox()
+        self.spin_target_rate.setRange(0.01, 1_000_000.0)
+        self.spin_target_rate.setDecimals(2)
+        self.spin_target_rate.setValue(6000.0)
+        self.lbl_target_unit = QLabel("N/min")
+        self.lbl_target_unit.setStyleSheet("color: #64748B; font-size: 8.5pt; background: transparent;")
+        grid.addWidget(self.lbl_target_rate, 1, 0)
+        grid.addWidget(self.spin_target_rate, 1, 1, 1, 2)
+        grid.addWidget(self.lbl_target_unit, 1, 3)
+
+        self.lbl_pid_mode = QLabel("PID 모드:")
+        self.combo_pid_mode = QComboBox()
+        for profile in self.pid_manager.list():
+            self.combo_pid_mode.addItem(profile.name_ko, profile.id)
+        self.combo_pid_mode.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_pid_mode.setMinimumContentsLength(20)
+        self.combo_pid_mode.setCurrentIndex(max(0, self.combo_pid_mode.findData("metal")))
+        self.combo_pid_mode.currentIndexChanged.connect(self._on_pid_profile_changed)
+        grid.addWidget(self.lbl_pid_mode, 2, 0)
+        grid.addWidget(self.combo_pid_mode, 2, 1, 1, 3)
+
+        self.lbl_gains = QLabel("게인:")
+        self.spin_kp = QDoubleSpinBox()
+        self.spin_ki = QDoubleSpinBox()
+        self.spin_kd = QDoubleSpinBox()
+        for spin, prefix in ((self.spin_kp, "P "), (self.spin_ki, "I "), (self.spin_kd, "D ")):
+            spin.setRange(0.0, 20.0)
+            spin.setDecimals(2)
+            spin.setSingleStep(0.05)
+            spin.setPrefix(prefix)
+            spin.setMinimumWidth(64)
+        grid.addWidget(self.lbl_gains, 3, 0)
+        grid.addWidget(self.spin_kp, 3, 1)
+        grid.addWidget(self.spin_ki, 3, 2)
+        grid.addWidget(self.spin_kd, 3, 3)
+
+        self.btn_save_pid = QPushButton("게인 저장")
+        self.btn_save_pid.setMinimumHeight(26)
+        self.btn_save_pid.clicked.connect(self._save_pid_gains)
+        self.lbl_pid_state = QLabel("")
+        self.lbl_pid_state.setStyleSheet("color: #1D4ED8; font-size: 8pt; background: transparent;")
+        grid.addWidget(self.btn_save_pid, 4, 0, 1, 2)
+        grid.addWidget(self.lbl_pid_state, 4, 2, 1, 2)
+
+        self.lbl_ctl_delay = QLabel("지연 (ms):")
+        self.spin_ctl_delay = QDoubleSpinBox()
+        self.spin_ctl_delay.setRange(0.0, 500.0)
+        self.spin_ctl_delay.setDecimals(0)
+        self.spin_ctl_delay.setValue(35.0)
+        self.lbl_ctl_hz = QLabel("주기 (Hz):")
+        self.spin_ctl_hz = QDoubleSpinBox()
+        self.spin_ctl_hz.setRange(5.0, 100.0)
+        self.spin_ctl_hz.setDecimals(0)
+        self.spin_ctl_hz.setValue(25.0)
+        grid.addWidget(self.lbl_ctl_delay, 5, 0)
+        grid.addWidget(self.spin_ctl_delay, 5, 1)
+        grid.addWidget(self.lbl_ctl_hz, 5, 2)
+        grid.addWidget(self.spin_ctl_hz, 5, 3)
+
+        self.lbl_ctl_status = QLabel("제어 상태: 대기 중")
+        self.lbl_ctl_status.setStyleSheet(
+            "color: #334155; font-size: 8pt; background: transparent;")
+        self.lbl_ctl_status.setWordWrap(True)
+        grid.addWidget(self.lbl_ctl_status, 6, 0, 1, 4)
+
+        self.lbl_ctl_hint = QLabel(
+            "게인은 추정 강성으로 환산한 변위 오차 기준입니다. "
+            "통신 주기(20~50 Hz)보다 빠른 응답은 제어하지 않습니다.")
+        self.lbl_ctl_hint.setStyleSheet(
+            "color: #64748B; font-size: 7.5pt; background: transparent;")
+        self.lbl_ctl_hint.setWordWrap(True)
+        grid.addWidget(self.lbl_ctl_hint, 7, 0, 1, 4)
+
+        # 변위 속도 제어에서는 PID 항목을 숨긴다
+        self.ctl_pid_widgets = [
+            self.lbl_pid_mode, self.combo_pid_mode, self.lbl_gains,
+            self.spin_kp, self.spin_ki, self.spin_kd, self.btn_save_pid,
+            self.lbl_pid_state, self.lbl_ctl_delay, self.spin_ctl_delay,
+            self.lbl_ctl_hz, self.spin_ctl_hz, self.lbl_ctl_hint,
+            self.lbl_ctl_status,
+        ]
+        self._on_pid_profile_changed(self.combo_pid_mode.currentIndex())
+        self._on_control_mode_changed(self.combo_control_mode.currentIndex())
+        return self.ctl_group
+
+    # ------------------------------------------------------------------
+    def _selected_control_mode(self) -> ControlMode:
+        return [ControlMode.DISP, ControlMode.LOAD_RATE,
+                ControlMode.STRESS_RATE, ControlMode.LOAD_HOLD][
+            max(0, min(3, self.combo_control_mode.currentIndex()))]
+
+    def _selected_pid_profile_id(self) -> str:
+        data = self.combo_pid_mode.currentData()
+        return str(data or "metal")
+
+    def _on_control_mode_changed(self, index: int):
+        mode = self._selected_control_mode()
+        t = TRANSLATIONS[self.current_lang]
+        uses_pid = mode is not ControlMode.DISP
+
+        for widget in getattr(self, "ctl_pid_widgets", []):
+            widget.setVisible(uses_pid)
+        # 변위 속도는 시험 조건의 '시험 속도'를 쓰므로 목표 속도 줄을 숨긴다
+        for widget in (self.lbl_target_rate, self.spin_target_rate, self.lbl_target_unit):
+            widget.setVisible(uses_pid)
+        self.lbl_speed.setVisible(not uses_pid)
+        self.spin_speed.setVisible(not uses_pid)
+
+        if mode is ControlMode.LOAD_RATE:
+            self.lbl_target_rate.setText(t["ctl_rate_load"])
+            self.lbl_target_unit.setText("N/min")
+        elif mode is ControlMode.STRESS_RATE:
+            self.lbl_target_rate.setText(t["ctl_rate_stress"])
+            self.lbl_target_unit.setText("MPa/s")
+        elif mode is ControlMode.LOAD_HOLD:
+            self.lbl_target_rate.setText(t["ctl_rate_hold"])
+            self.lbl_target_unit.setText("N/min")
+            # 하중 유지는 유지 시험의 목표 하중·유지 시간을 사용한다
+            if not self.rb_holding.isChecked():
+                self.rb_holding.setChecked(True)
+        else:
+            self.lbl_target_rate.setText(t["ctl_rate_disp"])
+            self.lbl_target_unit.setText("mm/min")
+
+        if not uses_pid:
+            self.lbl_ctl_status.setText(f'{t["ctl_status"]} {t["ctl_status_idle"]}')
+
+    def _on_pid_profile_changed(self, index: int):
+        profile = self.pid_manager.get(self._selected_pid_profile_id())
+        for spin, value in ((self.spin_kp, profile.kp), (self.spin_ki, profile.ki),
+                            (self.spin_kd, profile.kd)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        if hasattr(self, "lbl_pid_state"):
+            self.lbl_pid_state.setText("")
+
+    def _save_pid_gains(self):
+        profile_id = self._selected_pid_profile_id()
+        profile = self.pid_manager.update(
+            profile_id, kp=self.spin_kp.value(), ki=self.spin_ki.value(),
+            kd=self.spin_kd.value(),
+        )
+        t = TRANSLATIONS[self.current_lang]
+        self.lbl_pid_state.setText(t["ctl_gains_saved"].format(name=profile.name(self.current_lang)))
+
+    def _refresh_control_status(self):
+        t = TRANSLATIONS[self.current_lang]
+        text = self.active_driver.current_control_status(self.current_lang)
+        self.lbl_ctl_status.setText(f'{t["ctl_status"]} {text or t["ctl_status_idle"]}')
+
+    def _apply_control_language(self, t: dict):
+        self.ctl_group.setTitle(t["ctl_group"])
+        self.lbl_ctl_mode.setText(t["ctl_mode"])
+        self.combo_control_mode.setItemText(0, t["ctl_mode_disp"])
+        self.combo_control_mode.setItemText(1, t["ctl_mode_load"])
+        self.combo_control_mode.setItemText(2, t["ctl_mode_stress"])
+        self.combo_control_mode.setItemText(3, t["ctl_mode_hold"])
+        self.lbl_pid_mode.setText(t["ctl_pid_mode"])
+        for row in range(self.combo_pid_mode.count()):
+            profile = self.pid_manager.get(str(self.combo_pid_mode.itemData(row)))
+            self.combo_pid_mode.setItemText(row, profile.name(self.current_lang))
+        self.lbl_gains.setText(t["ctl_gains"])
+        self.btn_save_pid.setText(t["ctl_save_gains"])
+        self.lbl_ctl_delay.setText(t["ctl_delay"])
+        self.lbl_ctl_hz.setText(t["ctl_rate"])
+        self.lbl_ctl_hint.setText(t["ctl_hint"])
+        self._on_control_mode_changed(self.combo_control_mode.currentIndex())
+        self._refresh_control_status()
 
     def _create_right_panel(self) -> QWidget:
         panel = QWidget()
@@ -828,6 +1046,14 @@ class MainWindow(QMainWindow):
         lbl_format_val = QLabel("Data 8 Bit / Parity None / Stop 1 Bit (8-N-1)")
         lbl_format_val.setStyleSheet("color: #475569; font-weight: 600;")
         settings_layout.addWidget(lbl_format_val, 3, 1, 1, 2)
+
+        # 시험 중 실시간 속도 변경(SPD) 지원 여부
+        self.chk_live_speed = QCheckBox("시험 중 실시간 속도 변경 지원 (SPD 명령)")
+        self.chk_live_speed.setChecked(False)
+        self.chk_live_speed.setToolTip(
+            "인디케이터가 시험 중 SPD 명령을 받는 것이 확인된 경우에만 켭니다. "
+            "끄면 초기 강성으로 환산한 속도를 한 번만 넣습니다.")
+        settings_layout.addWidget(self.chk_live_speed, 4, 0, 1, 3)
 
         h_conn = QHBoxLayout()
         self.btn_connect_hw = QPushButton("장비 연결")
@@ -1492,6 +1718,16 @@ class MainWindow(QMainWindow):
         is_hold = (btn_id == 3)
         is_seq = (btn_id == 4)
 
+        # 굽힘·시퀀스는 변위 속도 제어만 지원한다
+        if hasattr(self, "combo_control_mode"):
+            self.combo_control_mode.setEnabled(not (is_bend or is_seq))
+            if (is_bend or is_seq) and self.combo_control_mode.currentIndex() != 0:
+                self.combo_control_mode.setCurrentIndex(0)
+        # 하중 유지 제어 중에 다른 시험 모드로 바꾸면 하중 속도 제어로 전환
+        if not is_hold and hasattr(self, "combo_control_mode") \
+                and self.combo_control_mode.currentIndex() == 3:
+            self.combo_control_mode.setCurrentIndex(1)
+
         self.lbl_drop.setVisible(not is_hold)
         self.spin_drop.setVisible(not is_hold)
 
@@ -1543,14 +1779,31 @@ class MainWindow(QMainWindow):
         btype = BendingType.THREE_POINT if self.combo_bend_type.currentIndex() == 0 else BendingType.FOUR_POINT
         htype = HoldingType.LOAD_HOLD if self.combo_hold_type.currentIndex() == 0 else HoldingType.DISP_HOLD
 
+        # 하중·응력 속도 제어는 소프트 PID 컨트롤러가 매 주기 속도를 정한다
+        control = self._selected_control_mode()
+        uses_pid = control is not ControlMode.DISP and \
+            mode in (TestMode.TENSILE, TestMode.COMPRESSION, TestMode.HOLDING)
+
         # 곡선 해상도 확보: 시편 표점거리 기준 약 0.02 mm 간격으로 샘플링한다 (20~250 Hz)
         speed_mm_min = self.spin_speed.value()
         samples_per_second = int(round((speed_mm_min / 60.0) / 0.02))
-        sampling_hz = max(20, min(250, samples_per_second))
+        sampling_hz = 200 if uses_pid else max(20, min(250, samples_per_second))
 
         return TestConfig(
             mode=mode,
             test_speed_mm_min=speed_mm_min,
+            control_mode=control.value if uses_pid else ControlMode.DISP.value,
+            target_rate=self.spin_target_rate.value() if uses_pid else 0.0,
+            target_load_n=self.spin_hold_val.value() if uses_pid and mode == TestMode.HOLDING else 0.0,
+            pid_profile_id=self._selected_pid_profile_id(),
+            pid_gains={
+                "kp": self.spin_kp.value(),
+                "ki": self.spin_ki.value(),
+                "kd": self.spin_kd.value(),
+            },
+            comm_delay_ms=self.spin_ctl_delay.value(),
+            control_rate_hz=self.spin_ctl_hz.value(),
+            live_speed_control=self.chk_live_speed.isChecked(),
             fracture_drop_ratio=self.spin_drop.value() / 100.0,
             max_displacement_mm=50.0,
             sampling_rate_hz=sampling_hz,
@@ -1595,10 +1848,20 @@ class MainWindow(QMainWindow):
         msg = t["status_running"].format(mode=config.mode.value, specimen=specimen.specimen_id)
         self.statusBar().showMessage(msg)
 
+        # 실장비는 인디케이터가 SPD 명령을 받는지 확인된 경우에만 실시간 제어한다
+        self.serial_driver.supports_live_speed_control = self.chk_live_speed.isChecked()
+        if config.uses_pid_control:
+            self.ctl_timer.start()
+        else:
+            self.ctl_timer.stop()
+            self.lbl_ctl_status.setText(f'{t["ctl_status"]} {t["ctl_status_idle"]}')
+
         self.active_driver.start_test(specimen, config)
 
     def _stop_test(self):
+        self.ctl_timer.stop()
         self.active_driver.stop_test()
+        self._refresh_control_status()
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
         self.statusBar().showMessage("시험 중단됨 (Stopped)")
@@ -1647,9 +1910,12 @@ class MainWindow(QMainWindow):
         self.btn_excel.setEnabled(True)
         self.btn_pdf.setEnabled(True)
         self._last_completion_reason = reason
+        self.ctl_timer.stop()
 
         specimen = self._get_current_specimen()
         config = self._get_current_config()
+        self._refresh_control_status()
+        self._last_tracking = self._tracking_summary(config, specimen)
         t = TRANSLATIONS[self.current_lang]
 
         step_events = list(getattr(self.active_driver, "step_events", []) or [])
@@ -1717,7 +1983,30 @@ class MainWindow(QMainWindow):
         ]
         if self.current_result.sequence_steps:
             lines.append(f"시퀀스: {self.current_result.sequence_name or '-'}")
+        if self._last_tracking:
+            lines.append(self._last_tracking)
         QMessageBox.information(self, "시험 완료", "시험이 완료되었습니다.\n" + "\n".join(lines))
+
+    def _tracking_summary(self, config: TestConfig, specimen: Specimen) -> str:
+        """하중·응력 속도 제어 시험의 추종 오차 · 오버슈트 요약 문장"""
+        trace = list(getattr(self.active_driver, "control_trace", []) or [])
+        if not config.uses_pid_control or not trace:
+            return ""
+        target_rate_n_s = 0.0
+        control = str(config.control_mode).upper()
+        if control == ControlMode.STRESS_RATE.value:
+            target_rate_n_s = config.target_rate * specimen.cross_sectional_area_mm2
+        elif control in (ControlMode.LOAD_RATE.value, ControlMode.LOAD_HOLD.value):
+            target_rate_n_s = config.target_rate / 60.0
+        target_load = config.target_holding_val if control == ControlMode.LOAD_HOLD.value else 0.0
+        metrics = evaluate_tracking(trace, target_rate_n_s=target_rate_n_s,
+                                    target_load_n=target_load)
+        t = TRANSLATIONS[self.current_lang]
+        return t["ctl_result"].format(
+            follow=metrics["follow_error_pct"],
+            over=metrics["overshoot_pct"],
+            hold=metrics["hold_error_pct"],
+        )
 
     # ------------------------------------------------------------------
     # 그래프 (단일 곡선 + 다중 시편 오버레이 + 시퀀스 단계 표시)

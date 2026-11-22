@@ -6,7 +6,7 @@ Salt Sw ver.1 - Data Models
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import math
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from .sequence import SequenceProgram
 
@@ -165,6 +165,17 @@ class TestConfig:
     target_holding_val: float = 1000.0      # 목표 유지값 (N 또는 mm)
     holding_duration_s: float = 60.0        # 목표 유지 시간 (초)
 
+    # 소프트 PID 하중·응력 속도 제어 (core/pid_controller.py)
+    # control_mode: DISP(변위 속도, 기본) | LOAD_RATE | STRESS_RATE | LOAD_HOLD
+    control_mode: str = "DISP"
+    target_rate: float = 0.0          # LOAD_RATE: N/min, STRESS_RATE: MPa/s, LOAD_HOLD: 접근 N/min
+    target_load_n: float = 0.0        # 하중 유지 목표 (0이면 target_holding_val 사용)
+    pid_profile_id: str = "metal"     # elastomer | film | metal
+    pid_gains: Dict[str, float] = field(default_factory=dict)  # 화면에서 미세 조정한 게인
+    comm_delay_ms: float = 35.0       # 통신 지연 (20~50 ms)
+    control_rate_hz: float = 25.0     # 제어 주기 (20~50 Hz)
+    live_speed_control: bool = True   # 시험 중 실시간 속도 변경 사용 여부
+
     # 신율계(Extensometer) 설정 (환경 설정 탭에서 저장/적용)
     ext: ExtensometerSettings = field(default_factory=ExtensometerSettings)
 
@@ -178,6 +189,11 @@ class TestConfig:
     @property
     def is_sequence(self) -> bool:
         return self.mode == TestMode.SEQUENCE
+
+    @property
+    def uses_pid_control(self) -> bool:
+        """변위 속도 제어가 아닌(하중·응력·유지) 제어인지"""
+        return str(self.control_mode).upper() != "DISP"
 
 
 @dataclass

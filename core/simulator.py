@@ -28,6 +28,10 @@ from .hardware_interface import HardwareInterface
 from .models import (
     DataPoint, ExtensometerSettings, Specimen, TestConfig, TestMode, BendingType, HoldingType
 )
+from .pid_controller import (
+    ControlMode, ControlPhase, PIDProfileManager, SoftPIDController, TrackingSample,
+    build_controller
+)
 from .sequence import SequenceController, StepAction
 
 
@@ -40,6 +44,13 @@ MATERIAL_PROFILES: Dict[str, Dict[str, float]] = {
     "SUS304": {"e": 193000.0, "sy": 260.0, "su": 620.0, "eu": 0.35, "ef": 0.50},
     "AL6061": {"e": 69000.0, "sy": 240.0, "su": 300.0, "eu": 0.08, "ef": 0.12},
     "SS330": {"e": 205000.0, "sy": 205.0, "su": 330.0, "eu": 0.20, "ef": 0.30},
+    # 연질(엘라스토머) · 필름류 — 소프트 PID 시험 대상
+    "NBR": {"e": 5.0, "sy": 4.0, "su": 13.0, "eu": 2.4, "ef": 3.6},
+    "EPDM": {"e": 4.0, "sy": 3.4, "su": 11.0, "eu": 2.6, "ef": 3.9},
+    "SILICONE": {"e": 3.0, "sy": 2.8, "su": 9.0, "eu": 2.8, "ef": 4.2},
+    "PET": {"e": 3000.0, "sy": 60.0, "su": 120.0, "eu": 0.08, "ef": 0.12},
+    "PE": {"e": 900.0, "sy": 18.0, "su": 30.0, "eu": 0.12, "ef": 0.35},
+    "PI": {"e": 3500.0, "sy": 90.0, "su": 150.0, "eu": 0.06, "ef": 0.10},
 }
 DEFAULT_PROFILE_KEY = "SS400"
 
@@ -47,7 +58,8 @@ DEFAULT_PROFILE_KEY = "SS400"
 def resolve_material_profile(material_text: str) -> Dict[str, float]:
     """재질 문자열에서 규격 프로필을 찾는다 (없으면 SS400)"""
     text = (material_text or "").upper().replace(" ", "")
-    for key in MATERIAL_PROFILES:
+    # 긴 표기를 먼저 본다 (예: 'PET' 를 'PE' 로 잘못 읽지 않도록)
+    for key in sorted(MATERIAL_PROFILES, key=len, reverse=True):
         if key in text:
             return dict(MATERIAL_PROFILES[key])
     return dict(MATERIAL_PROFILES[DEFAULT_PROFILE_KEY])
@@ -76,6 +88,18 @@ class VirtualUTMSimulator(HardwareInterface):
         self.current_displacement: float = 0.0
         self.current_load: float = 0.0
 
+        # 시험 중 실시간 속도 변경 지원 (가상 장비는 항상 지원)
+        self.supports_live_speed_control = True
+        self._live_speed_mm_min: float = 0.0
+
+        # 소프트 PID 제어 상태 (하중·응력 속도 제어 시 사용)
+        self.pid_manager = PIDProfileManager()
+        self.controller: Optional[SoftPIDController] = None
+        self.control_trace: List[TrackingSample] = []
+
+        # 검증·화면 캡처용 시간 배속 (1.0 = 실시간). 물리 계산은 그대로 두고 시간만 빨리 흘린다.
+        self.time_scale: float = 1.0
+
         # 신율계 상태
         self.ext: ExtensometerSettings = ExtensometerSettings()
         self.current_ext_disp_mm: float = 0.0
@@ -93,6 +117,22 @@ class VirtualUTMSimulator(HardwareInterface):
         self.current_ext_disp_mm = 0.0
         self.current_ext_raw = 0.0
         self.current_ext_valid = False
+
+    # ------------------------------------------------------------------
+    def set_speed(self, speed_mm_min: float):
+        """시험 중 속도 변경 - 다음 스텝부터 바로 반영 (변위 속도 제어)"""
+        self._live_speed_mm_min = max(0.0, float(speed_mm_min))
+
+    def _effective_speed_mm_s(self) -> float:
+        if self._live_speed_mm_min > 0:
+            return self._live_speed_mm_min / 60.0
+        return (self.config.test_speed_mm_min if self.config else 0.0) / 60.0
+
+    def current_control_status(self, lang: str = "KO") -> str:
+        """소프트 PID 제어 상태 (변위 속도 제어 시에는 빈 문자열)"""
+        if self.controller is None:
+            return ""
+        return self.controller.status_text(lang)
 
     def tare_extensometer(self):
         """현재 신율계 원시값을 영점으로 설정"""
@@ -137,7 +177,17 @@ class VirtualUTMSimulator(HardwareInterface):
         if config.mode == TestMode.SEQUENCE:
             self.sequence_name = config.sequence.name
 
-        self._thread = threading.Thread(target=self._run_simulation, daemon=True)
+        # 하중·응력 속도 제어 여부 (굽힘·시퀀스는 변위 속도 제어만 지원)
+        self._live_speed_mm_min = 0.0
+        use_control = (config.uses_pid_control and
+                       config.mode in (TestMode.TENSILE, TestMode.COMPRESSION, TestMode.HOLDING))
+        self.controller = build_controller(config, specimen, self.pid_manager) if use_control else None
+        self.control_trace = []
+        if use_control and self.controller is None:
+            use_control = False
+
+        target = self._run_controlled if use_control else self._run_simulation
+        self._thread = threading.Thread(target=target, daemon=True)
         self._thread.start()
 
     def stop_test(self):
@@ -195,7 +245,6 @@ class VirtualUTMSimulator(HardwareInterface):
         uts_strain = profile["eu"]
         fracture_strain = profile["ef"] * scatter.get("ef", 1.0)
 
-        speed_mm_s = config.test_speed_mm_min / 60.0
         interval_s = 1.0 / max(5, config.sampling_rate_hz)
 
         b = specimen.width_mm
@@ -256,9 +305,13 @@ class VirtualUTMSimulator(HardwareInterface):
         base_hold_load = 0.0
         base_hold_disp = 0.0
 
+        elapsed_virtual = 0.0
         while not self._stop_event.is_set():
             loop_start = time.time()
-            elapsed_time = loop_start - start_time
+            # 가상 시간은 물리 스텝과 정확히 일치시킨다 (시간 배속은 대기 시간만 줄인다)
+            elapsed_virtual += interval_s
+            elapsed_time = elapsed_virtual
+            speed_mm_s = self._effective_speed_mm_s()
 
             # --- 시퀀스: 단계가 바뀐 시점의 기준값 저장 ---
             if seq_ctl is not None and seq_ctl.current_index != seq_last_index:
@@ -451,7 +504,7 @@ class VirtualUTMSimulator(HardwareInterface):
                 break
 
             elapsed_loop = time.time() - loop_start
-            sleep_time = max(0.001, interval_s - elapsed_loop)
+            sleep_time = max(0.001, (interval_s - elapsed_loop) / max(0.001, self.time_scale))
             time.sleep(sleep_time)
 
         # 시퀀스 기록 마무리 (중지/안전 한계로 끝난 경우 진행 중 단계를 닫는다)
@@ -459,6 +512,191 @@ class VirtualUTMSimulator(HardwareInterface):
             if not seq_ctl.is_finished:
                 seq_ctl.abort(time.time() - start_time, load, disp, "시험 중단")
             self.step_events = seq_ctl.events_as_dicts()
+
+        self.is_running = False
+        if self.on_test_completed:
+            try:
+                self.on_test_completed(completion_reason)
+            except Exception:
+                pass
+
+    # ------------------------------------------------------------------
+    # 소프트 PID 제어 시뮬레이션 (하중 속도 · 응력 속도 · 하중 유지)
+    # ------------------------------------------------------------------
+    SERVO_TIME_CONSTANT_S = 0.06     # 서보·볼스크류 응답 지연 (1차 지연)
+    HOLD_CREEP_STRAIN_RATE = 1.0e-6  # 하중 유지 중 시편 크리프 (변형률/s)
+    HOLD_OVERLOAD_RATIO = 1.20       # 목표 하중 20% 초과 시 안전 정지
+
+    def _run_controlled(self):
+        """
+        하중·응력 속도 제어 시험.
+        실제 장비와 같은 순서(지연된 계측 -> 제어 주기 계산 -> 서보 응답 -> 시편 변형)로 계산한다.
+        """
+        specimen = self.specimen
+        config = self.config
+        controller = self.controller
+        area = specimen.cross_sectional_area_mm2
+        l0 = specimen.gauge_length_mm
+        mode = ControlMode.parse(config.control_mode)
+        hold_mode = mode is ControlMode.LOAD_HOLD
+
+        ext_on = bool(self.ext.enabled)
+        ext_gl = self.ext.gauge_length_mm if ext_on else l0
+
+        profile = self.profile
+        scatter = self.scatter
+        e_modulus = profile["e"] * scatter.get("e", 1.0)
+        yield_stress = profile["sy"] * scatter.get("sy", 1.0)
+        yield_strain = yield_stress / e_modulus
+        uts_stress = profile["su"] * scatter.get("su", 1.0)
+        uts_strain = profile["eu"]
+        fracture_strain = profile["ef"] * scatter.get("ef", 1.0)
+
+        interval = 1.0 / max(5, config.sampling_rate_hz)
+        ctrl_period = 1.0 / max(1.0, config.control_rate_hz)
+        delay_s = max(0.0, min(0.5, config.comm_delay_ms / 1000.0))
+
+        def evaluate(gauge_deform: float) -> Tuple[float, float, float]:
+            """표점부 변형량 -> (하중 N, 응력 MPa, 변형률)"""
+            strain = gauge_deform / l0
+            if config.mode == TestMode.COMPRESSION:
+                stress = self._calc_compression_stress(strain, e_modulus, yield_stress, yield_strain)
+            else:
+                stress = self._calc_tensile_stress(
+                    strain, e_modulus, yield_stress, yield_strain,
+                    uts_stress, uts_strain, fracture_strain
+                )
+            return max(0.0, stress * area), stress, strain
+
+        start_time = time.time()
+        elapsed = 0.0
+        gauge_deform = 0.0
+        load = 0.0
+        stress = 0.0
+        strain = 0.0
+        peak_load = 0.0
+        speed_act_mm_s = 0.0        # 실제 크로스헤드 속도 (서보 지연 반영)
+        speed_cmd_mm_s = 0.0
+        next_ctrl = 0.0
+        last_ctrl_t = 0.0
+        fixed_speed_set = False
+        stopping = False     # 실시간 속도 변경 미지원 시 1회 설정 여부
+        history: List[Tuple[float, float, float]] = []
+        hist_idx = 0
+        completion_reason = "정상 종료"
+
+        while not self._stop_event.is_set():
+            loop_start = time.time()
+            # 가상 시간은 물리 스텝과 정확히 일치시킨다 (시간 배속은 대기 시간만 줄인다)
+            elapsed += interval
+
+            # 1) 계측 이력 적재 및 통신 지연 반영 (지연된 계측값만 보인다)
+            history.append((elapsed, load, gauge_deform))
+            target_t = elapsed - delay_s
+            while hist_idx + 1 < len(history) and history[hist_idx + 1][0] <= target_t:
+                hist_idx += 1
+            _, meas_load, meas_disp = history[hist_idx]
+
+            # 2) 제어 주기마다 속도 명령 갱신
+            if elapsed + 1e-9 >= next_ctrl:
+                dt_ctrl = interval if next_ctrl == 0 else elapsed - last_ctrl_t
+                if not stopping:
+                    ctrl_speed = controller.update(dt_ctrl, meas_load, meas_disp)
+                    last_ctrl_t = elapsed
+                    if controller.live_speed_control:
+                        speed_cmd_mm_s = ctrl_speed / 60.0
+                    else:
+                        # 고정 속도 폴백: 초기 강성으로 환산한 속도를 한 번만 넣는다
+                        if not fixed_speed_set:
+                            ff = controller.feedforward_speed_mm_min
+                            if ff > 0:
+                                speed_cmd_mm_s = ff / 60.0
+                                fixed_speed_set = True
+                else:
+                    speed_cmd_mm_s = 0.0
+
+                self.control_trace.append(TrackingSample(
+                    time_s=round(elapsed, 3),
+                    setpoint_n=round(controller.setpoint_load_n, 2),
+                    load_n=round(load, 2),
+                    speed_mm_min=round(speed_cmd_mm_s * 60.0, 3),
+                    stiffness_n_per_mm=round(controller.stiffness_n_per_mm, 1),
+                ))
+                next_ctrl += ctrl_period
+
+            # 3) 서보 응답 지연 후 이동, 하중 유지 중에는 크리프만큼 시편이 더 늘어난다
+            speed_act_mm_s += (speed_cmd_mm_s - speed_act_mm_s) * min(
+                1.0, interval / max(1e-3, self.SERVO_TIME_CONSTANT_S))
+            creep = 0.0
+            if hold_mode and controller.phase == ControlPhase.HOLD and load > 0:
+                creep = l0 * self.HOLD_CREEP_STRAIN_RATE * interval
+            gauge_deform = max(0.0, gauge_deform + speed_act_mm_s * interval + creep)
+
+            # 4) 시편 응답
+            raw_load, stress, strain = evaluate(gauge_deform)
+            load = max(0.0, raw_load * (1.0 + random.gauss(0, 0.003)))
+            if load > peak_load:
+                peak_load = load
+
+            # 5) 신율계 원시 신호 생성 및 복원
+            ext_disp = 0.0
+            ext_strain = 0.0
+            ext_raw = 0.0
+            ext_valid = False
+            if ext_on:
+                ext_raw, ext_disp = self._encode_ext(gauge_deform)
+                ext_strain = self.ext.to_strain_pct(ext_disp)
+                ext_valid = True
+
+            point = DataPoint(
+                time_s=round(elapsed, 3),
+                displacement_mm=round(gauge_deform, 4),
+                load_n=round(load, 2),
+                stress_mpa=round(stress, 2),
+                strain_pct=round(ext_strain if ext_valid else strain * 100.0, 3),
+                ext_disp_mm=round(ext_disp, 4),
+                ext_strain_pct=round(ext_strain, 3),
+                ext_raw=ext_raw,
+                ext_valid=ext_valid,
+            )
+
+            self.current_displacement = gauge_deform
+            self.current_load = load
+            self.current_ext_disp_mm = ext_disp
+            self.current_ext_raw = ext_raw
+            self.current_ext_valid = ext_valid
+
+            if self.on_data_received:
+                try:
+                    self.on_data_received(point)
+                except Exception:
+                    pass
+
+            # 6) 종료 판정
+            if stopping and abs(speed_act_mm_s) < 2e-6:
+                break
+            if controller.is_finished:
+                completion_reason = "목표 하중 유지 완료"
+                break
+            if hold_mode and controller.target_load_n > 0:
+                if load > controller.target_load_n * self.HOLD_OVERLOAD_RATIO:
+                    completion_reason = "과하중 안전 정지 (목표 20% 초과)"
+                    break
+                if not controller.live_speed_control and meas_load >= controller.target_load_n:
+                    # 실시간 보정이 없으면 지연된 계측으로 정지 지령만 줄 수 있다
+                    completion_reason = "목표 하중 도달 (고정 속도 · 실시간 보정 없음)"
+                    stopping = True
+            if config.mode != TestMode.COMPRESSION and strain >= uts_strain and peak_load > 50:
+                drop_ratio = (peak_load - load) / peak_load
+                if drop_ratio >= config.fracture_drop_ratio or strain >= fracture_strain:
+                    completion_reason = "시편 파단 (Fracture Detected)"
+                    break
+            if gauge_deform >= config.max_displacement_mm:
+                completion_reason = "최대 변위 도달 (Safety Limit)"
+                break
+
+            elapsed_loop = time.time() - loop_start
+            time.sleep(max(0.001, (interval - elapsed_loop) / max(0.001, self.time_scale)))
 
         self.is_running = False
         if self.on_test_completed:

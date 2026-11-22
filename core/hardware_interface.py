@@ -12,6 +12,10 @@ from .sequence import SequenceProgram
 class HardwareInterface(ABC):
     """UTM 하드웨어 제어 및 데이터 수집 추상 기본 클래스"""
 
+    # 시험 중 실시간 속도 변경(SPD 명령) 지원 여부
+    # 봉신 P2020 / P2014 는 아직 확인되지 않았으므로 기본값은 미지원이다.
+    supports_live_speed_control: bool = False
+
     def __init__(self):
         self.is_connected: bool = False
         self.is_running: bool = False
@@ -61,6 +65,14 @@ class HardwareInterface(ABC):
     def set_extensometer(self, settings: Optional[ExtensometerSettings]):
         """신율계 설정 적용 (환경 설정 값) - 지원하지 않는 드라이버는 무시"""
         pass
+
+    def set_speed(self, speed_mm_min: float):
+        """시험 중 크로스헤드 속도 변경 - 실시간 변경을 지원하지 않으면 무시"""
+        pass
+
+    def current_control_status(self) -> str:
+        """소프트 PID 제어 상태 표시 문자열 (변위 제어·미지원이면 빈 문자열)"""
+        return ""
 
     def current_sequence_status(self) -> str:
         """진행 중인 시퀀스 단계 표시 문자열 (미지원 드라이버는 빈 문자열)"""
