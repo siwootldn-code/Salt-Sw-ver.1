@@ -82,7 +82,7 @@ salt-sw-v1/
 │   ├── main_window.py         # PyQt6 기반 전문 UTM 대시보드 윈도우 + 환경 설정 탭
 │   ├── dialogs.py             # 시퀀스 편집 창 · 시험 이력(무결성) 창
 │   └── styles.py              # 산업용 고시인성 테마 QSS
-├── tests/                     # 신율계·환경설정·오버레이·이력·시퀀스·소프트 PID 자동 검증 (unittest/pytest, 137개)
+├── tests/                     # 신율계·환경설정·오버레이·이력·시퀀스·소프트 PID 자동 검증 (unittest/pytest, 141개)
 ├── tools/capture_ui.py        # offscreen UI 스크린샷 생성 스크립트
 ├── tools/capture_pid_ui.py    # 소프트 PID 제어 화면 스크린샷 생성
 ├── tools/pid_benchmark.py     # 재질 3종 PID vs 고정 속도 추종 성능 측정·그래프
@@ -134,11 +134,14 @@ python cli_demo.py batch    # 3시편 배치 + 배치 통계 + 이력/무결성 
 python -m unittest discover -s tests -v
 ```
 신율계 신호 환산(mV/펄스), 환경 설정 저장·복원, RS-232 패킷 파싱, 3가지 모드의 전 과정 시험·계산·성적서 출력,
-환경 설정 탭 UI, **배치 통계·오버레이·시험 이력(무결성/변조 감지)·다단계 시퀀스** 동작을 검증합니다.
+환경 설정 탭 UI, **배치 통계·오버레이·시험 이력(무결성/변조 감지)·다단계 시퀀스**, 그리고
+**소프트 PID 하중·응력 속도 제어(통신 지연 20~50 ms 조건 포함)** 동작을 검증합니다.
 
 ```bash
 python -m unittest tests.test_overlay_history_sequence -v   # 오버레이 · 이력 · 시퀀스 (핵심 로직)
 python -m unittest tests.test_ui_overlay -v                 # 화면 연동 (세션 · 통계 · 이력 · 시퀀스)
+python -m unittest tests.test_pid_controller -v             # 소프트 PID 제어 (게인·피드포워드·추종 성능)
+python3 tools/pid_benchmark.py                              # 재질 3종 PID vs 고정 속도 성능 측정
 ```
 
 ---
