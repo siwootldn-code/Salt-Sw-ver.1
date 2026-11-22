@@ -429,6 +429,7 @@ class ControllerStatus:
     stiffness_source: str = "none"
     elapsed_s: float = 0.0
     hold_elapsed_s: float = 0.0
+    rate_unreachable: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -446,6 +447,7 @@ class SoftPIDController:
     ACTUATOR_LAG_S = 0.08        # 서보·기계 응답 지연 (제동 거리 계산용)
     MEASUREMENT_FILTER_S = 0.03  # 계측값 저역 통과 시정수 (제어 진동 억제)
     BRAKING_MARGIN = 1.4         # 제동 거리 안전 여유
+    UNREACHABLE_HOLD_S = 3.0     # 목표 속도를 낼 수 없는 상태가 이어지면 시험을 멈춘다
 
     def __init__(self, profile: PIDProfile, mode: ControlMode = ControlMode.LOAD_RATE,
                  target_rate_n_s: float = 0.0, target_load_n: float = 0.0,
@@ -484,6 +486,7 @@ class SoftPIDController:
         self.elapsed_s = 0.0
         self.hold_elapsed_s = 0.0
         self._saturated = False
+        self._unreachable_time = 0.0
         # 속도 변화율 한계 (mm/min per s): 최대 속도까지 약 0.4초에 도달하는 수준
         self.slew_mm_min_per_s = max(0.2, self.profile.max_speed_mm_min / 0.4)
 
@@ -511,6 +514,11 @@ class SoftPIDController:
     @property
     def is_finished(self) -> bool:
         return self.phase == ControlPhase.FINISHED
+
+    @property
+    def is_rate_unreachable(self) -> bool:
+        """현재 강성에서 목표 하중 속도를 낼 수 없는 상태가 이어졌는지"""
+        return self._unreachable_time >= self.UNREACHABLE_HOLD_S
 
     @property
     def feedforward_speed_mm_min(self) -> float:
@@ -596,6 +604,16 @@ class SoftPIDController:
         if self.phase != ControlPhase.HOLD and k > 0:
             ff_mm_s = rate / k
 
+        # 4-1) 목표 속도 달성 가능 여부 (강성이 무너진 뒤 최대 속도로도 못 따라가는 상태)
+        if self.phase != ControlPhase.HOLD and self.target_rate_n_s > 0 and k > 0:
+            required_mm_min = self.target_rate_n_s / k * 60.0
+            if required_mm_min > self.profile.max_speed_mm_min * 1.05:
+                self._unreachable_time += dt
+            else:
+                self._unreachable_time = 0.0
+        else:
+            self._unreachable_time = 0.0
+
         # 5) 목표 근접 시 게인 완화 (조기 감속)
         kp, ki, kd = self.profile.kp, self.profile.ki, self.profile.kd
         zone = self.profile.damping_zone_ratio * self.target_load_n
@@ -662,6 +680,7 @@ class SoftPIDController:
             stiffness_source=self.ff.source,
             elapsed_s=round(self.elapsed_s, 2),
             hold_elapsed_s=round(self.hold_elapsed_s, 2),
+            rate_unreachable=self.is_rate_unreachable,
         )
 
     def status_text(self, lang: str = "KO") -> str:
@@ -673,13 +692,15 @@ class SoftPIDController:
             stiffness = f"{st.stiffness_n_per_mm:,.0f} N/mm ({source})"
         else:
             stiffness = tr(lang, "pid_src_none")
+        warning_en = " · rate not achievable" if st.rate_unreachable else ""
+        warning_ko = " · 목표 속도 미달" if st.rate_unreachable else ""
         if str(lang).upper() == "EN":
             return (f"Stiffness {stiffness} · FF {st.feedforward_mm_min:.3f} mm/min · "
                     f"trim {st.correction_mm_min:+.3f} mm/min · {st.measured_load_n:,.1f} N "
-                    f"(target {st.setpoint_load_n:,.1f} N)")
+                    f"(target {st.setpoint_load_n:,.1f} N){warning_en}")
         return (f"강성 {stiffness} · 기준 속도 {st.feedforward_mm_min:.3f} mm/min · "
                 f"보정 {st.correction_mm_min:+.3f} mm/min · 현재 {st.measured_load_n:,.1f} N "
-                f"(목표 {st.setpoint_load_n:,.1f} N)")
+                f"(목표 {st.setpoint_load_n:,.1f} N){warning_ko}")
 
 
 def build_controller(config: Any, specimen: Any,

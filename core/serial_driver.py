@@ -523,6 +523,10 @@ class SerialUTMDriver(HardwareInterface):
                 print(f"[SerialUTMDriver] 고정 속도 운전: 강성 {ctrl.stiffness_n_per_mm:,.0f} N/mm "
                       f"→ {ff:.4f} mm/min")
 
+        if ctrl.is_rate_unreachable:
+            self.send_command(format_sequence_command(SequenceCommand.STOP))
+            return "목표 하중 속도 미달 (현재 강성 · 최대 속도 초과)"
+
         self.control_trace.append(TrackingSample(
             time_s=round(dp.time_s, 3),
             setpoint_n=round(ctrl.setpoint_load_n, 2),

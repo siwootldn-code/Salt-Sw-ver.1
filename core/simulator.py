@@ -675,6 +675,9 @@ class VirtualUTMSimulator(HardwareInterface):
             # 6) 종료 판정
             if stopping and abs(speed_act_mm_s) < 2e-6:
                 break
+            if controller.is_rate_unreachable:
+                completion_reason = "목표 하중 속도 미달 (현재 강성 · 최대 속도 초과)"
+                break
             if controller.is_finished:
                 completion_reason = "목표 하중 유지 완료"
                 break

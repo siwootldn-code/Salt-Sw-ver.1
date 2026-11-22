@@ -442,6 +442,27 @@ class TestControlledSimulation(unittest.TestCase):
         self.assertAlmostEqual(rate_early, 0.5, delta=0.05)     # 30 mm/min = 0.5 mm/s
         self.assertAlmostEqual(rate_late, 1.5, delta=0.10)      # 90 mm/min = 1.5 mm/s
 
+    def test_unreachable_rate_stops_test(self):
+        """항복 뒤 강성이 무너져 목표 속도를 낼 수 없으면 최대 속도로 폭주하지 않고 멈춘다"""
+        random.seed(4)
+        specimen = flat_specimen("SS400", 12.5, 3.2)
+        config = TestConfig(mode=TestMode.TENSILE, control_mode="LOAD_RATE",
+                            target_rate=300000.0,      # 5,000 N/s — 탄성역에서도 최대 속도 초과
+                            pid_profile_id="metal", comm_delay_ms=35.0,
+                            control_rate_hz=25.0, sampling_rate_hz=200,
+                            max_displacement_mm=50.0)
+        sim = VirtualUTMSimulator()
+        sim.time_scale = 20.0
+        sim.connect()
+        state = {}
+        sim.on_test_completed = lambda reason: state.setdefault("reason", reason)
+        sim.start_test(specimen, config)
+        deadline = time.time() + 25.0
+        while "reason" not in state and time.time() < deadline:
+            time.sleep(0.01)
+        sim.stop_test()
+        self.assertIn("목표 하중 속도 미달", state.get("reason", ""), state.get("reason", ""))
+
     def test_bending_ignores_pid_control(self):
         random.seed(1)
         specimen = flat_specimen("SS400", 12.5, 3.2)
