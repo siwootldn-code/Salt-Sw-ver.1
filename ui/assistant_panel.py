@@ -130,6 +130,7 @@ class TestAssistantPanel(QFrame):
 
     start_requested = pyqtSignal()
     cancel_requested = pyqtSignal()
+    change_dir_requested = pyqtSignal()
 
     def __init__(self, lang: str = "KO", parent=None):
         super().__init__(parent)
@@ -247,9 +248,13 @@ class TestAssistantPanel(QFrame):
         self.chk_auto.setChecked(True)
         self.lbl_save_dir = QLabel("")
         self.lbl_save_dir.setProperty("class", "asst-path")
+        self.btn_change_dir = QPushButton()
+        self.btn_change_dir.setMinimumHeight(24)
+        self.btn_change_dir.clicked.connect(self.change_dir_requested.emit)
         auto_row.addWidget(self.chk_auto)
         auto_row.addStretch()
         auto_row.addWidget(self.lbl_save_dir)
+        auto_row.addWidget(self.btn_change_dir)
         root.addWidget(self.auto_widget)
 
         # 진행 / 완료 상태
@@ -329,6 +334,7 @@ class TestAssistantPanel(QFrame):
             label.setText(t[f"asst_sum_{key}"])
         self.chk_auto.setText(t["asst_auto_save"])
         self.lbl_save_dir.setText(t["asst_save_dir"].format(path=self.save_dir))
+        self.btn_change_dir.setText(t["asst_change_dir"])
         self.btn_start.setText(t["asst_start"])
         self.btn_cancel.setText(t["asst_close"] if self.state == "done" else t["asst_cancel"])
         self.lbl_running_hint.setText(t["asst_running_hint"])
@@ -365,6 +371,12 @@ class TestAssistantPanel(QFrame):
         self._update_shape_visibility()
         self._render()
         self.setVisible(True)
+
+    def set_save_dir(self, save_dir: str):
+        self.save_dir = save_dir
+        self.lbl_save_dir.setText(
+            TRANSLATIONS.get(self.lang, TRANSLATIONS["KO"])["asst_save_dir"].format(path=save_dir)
+        )
 
     def mark_running(self):
         self.state = "running"

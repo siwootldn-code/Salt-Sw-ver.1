@@ -10,11 +10,14 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout, QLabel, QPushButton,
     QComboBox, QDoubleSpinBox, QLineEdit, QTableWidget, QTableWidgetItem,
-    QHeaderView, QAbstractItemView, QGroupBox, QSizePolicy
+    QHeaderView, QAbstractItemView, QGroupBox, QSizePolicy, QCheckBox,
+    QFileDialog, QMessageBox
 )
 
+from core.auto_export import FOLDER_RULES, resolve_report_dir
 from core.history import HistorySummary, TestHistoryStore
 from core.i18n import TRANSLATIONS, tr
+from core.models import Specimen, TestConfig
 from core.sequence import SequenceProgram, SequenceStep, StepAction
 from ui.styles import HYUNDAI_THEME_QSS
 
@@ -494,3 +497,132 @@ class HistoryDialog(QDialog):
         self.lbl_status.setText(message)
         if ok:
             self.accept()
+
+
+class PostTestSaveDialog(QDialog):
+    """시험 완료 후 요약 확인 및 저장 폴더 · 분류 방식 선택 창"""
+
+    def __init__(
+        self,
+        summary_lines: List[str],
+        specimen: Specimen,
+        config: TestConfig,
+        base_dir: str,
+        folder_rule: str = "date",
+        lang: str = "KO",
+        parent=None,
+    ):
+        super().__init__(parent)
+        self.lang = lang
+        self.t = TRANSLATIONS.get(lang, TRANSLATIONS["KO"])
+        self.specimen = specimen
+        self.config = config
+
+        self.selected_base_dir: str = base_dir
+        self.selected_rule: str = folder_rule
+        self.want_excel: bool = True
+        self.want_pdf: bool = True
+
+        self.setWindowTitle(self.t["post_title"])
+        self.resize(620, 420)
+        self.setStyleSheet(HYUNDAI_THEME_QSS)
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(14, 14, 14, 14)
+        root.setSpacing(10)
+
+        # 1) 시험 완료 요약
+        sum_group = QGroupBox(self.t["post_summary_group"])
+        sum_layout = QVBoxLayout(sum_group)
+        lbl_summary = QLabel("\n".join(summary_lines))
+        lbl_summary.setWordWrap(True)
+        lbl_summary.setStyleSheet("color: #0F172A; font-size: 9.5pt; line-height: 1.4; background: transparent;")
+        sum_layout.addWidget(lbl_summary)
+        root.addWidget(sum_group)
+
+        # 2) 저장 폴더 및 형식 선택
+        save_group = QGroupBox(self.t["post_save_group"])
+        grid = QGridLayout(save_group)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(8)
+
+        grid.addWidget(QLabel(self.t["post_target_dir"]), 0, 0)
+        self.edit_dir = QLineEdit(base_dir)
+        self.edit_dir.textChanged.connect(self._update_preview)
+        grid.addWidget(self.edit_dir, 0, 1)
+
+        btn_browse = QPushButton(self.t["post_browse"])
+        btn_browse.setMinimumWidth(110)
+        btn_browse.clicked.connect(self._browse_dir)
+        grid.addWidget(btn_browse, 0, 2)
+
+        grid.addWidget(QLabel(self.t["post_rule"]), 1, 0)
+        self.combo_rule = QComboBox()
+        for rule in FOLDER_RULES:
+            self.combo_rule.addItem(self.t[f"save_rule_{rule}"], rule)
+        idx = self.combo_rule.findData(folder_rule)
+        if idx >= 0:
+            self.combo_rule.setCurrentIndex(idx)
+        self.combo_rule.currentIndexChanged.connect(self._update_preview)
+        grid.addWidget(self.combo_rule, 1, 1, 1, 2)
+
+        grid.addWidget(QLabel(self.t["post_final_path"]), 2, 0)
+        self.lbl_preview = QLabel("")
+        self.lbl_preview.setWordWrap(True)
+        self.lbl_preview.setStyleSheet("color: #1D4ED8; font-weight: 600; font-size: 9pt; background: transparent;")
+        grid.addWidget(self.lbl_preview, 2, 1, 1, 2)
+
+        chk_row = QHBoxLayout()
+        chk_row.setSpacing(16)
+        self.chk_excel = QCheckBox(self.t["post_save_excel"])
+        self.chk_excel.setChecked(True)
+        self.chk_pdf = QCheckBox(self.t["post_save_pdf"])
+        self.chk_pdf.setChecked(True)
+        chk_row.addWidget(self.chk_excel)
+        chk_row.addWidget(self.chk_pdf)
+        chk_row.addStretch()
+        grid.addLayout(chk_row, 3, 1, 1, 2)
+
+        root.addWidget(save_group)
+
+        # 3) 하단 버튼
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_skip = QPushButton(self.t["post_btn_skip"])
+        btn_skip.setMinimumHeight(34)
+        btn_skip.clicked.connect(self.reject)
+
+        btn_save = QPushButton(self.t["post_btn_save"])
+        btn_save.setMinimumHeight(34)
+        btn_save.setMinimumWidth(160)
+        btn_save.setStyleSheet("background-color: #1D4ED8; color: #FFFFFF; font-weight: bold;")
+        btn_save.setDefault(True)
+        btn_save.clicked.connect(self._on_save)
+
+        btn_row.addWidget(btn_skip)
+        btn_row.addWidget(btn_save)
+        root.addLayout(btn_row)
+
+        self._update_preview()
+
+    def _browse_dir(self):
+        current = self.edit_dir.text().strip() or self.selected_base_dir
+        chosen = QFileDialog.getExistingDirectory(self, self.t["post_browse"], current)
+        if chosen:
+            self.edit_dir.setText(chosen)
+
+    def _update_preview(self):
+        base = self.edit_dir.text().strip() or self.selected_base_dir
+        rule = self.combo_rule.currentData() or "date"
+        resolved = resolve_report_dir(base, self.config, self.specimen, folder_rule=rule, lang=self.lang)
+        self.lbl_preview.setText(resolved)
+
+    def _on_save(self):
+        if not self.chk_excel.isChecked() and not self.chk_pdf.isChecked():
+            QMessageBox.warning(self, self.t["post_title"], self.t["post_need_one"])
+            return
+        self.selected_base_dir = self.edit_dir.text().strip() or self.selected_base_dir
+        self.selected_rule = self.combo_rule.currentData() or "date"
+        self.want_excel = self.chk_excel.isChecked()
+        self.want_pdf = self.chk_pdf.isChecked()
+        self.accept()

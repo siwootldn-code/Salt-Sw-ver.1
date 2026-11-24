@@ -12,21 +12,36 @@ import os
 from dataclasses import dataclass, asdict, field
 from typing import Any, Optional
 
+from .auto_export import AUTO_REPORT_DIR, FOLDER_RULES
 from .models import ExtensometerSettings, ExtensometerType
 
 
-PREFERENCES_VERSION = 1
+PREFERENCES_VERSION = 2
+
+
+@dataclass
+class SaveSettings:
+    """시험 데이터 · 성적서 저장 폴더 설정"""
+    base_dir: str = ""                 # 비어 있으면 기본 output/auto_reports 사용
+    folder_rule: str = "date"          # flat | date | mode | specimen | date_mode
+    ask_after_test: bool = True        # 시험 완료 후 저장 폴더 선택 창 표시
+    last_dir: str = ""                 # 마지막으로 직접 선택한 폴더
+
+    def effective_base_dir(self) -> str:
+        return str(self.base_dir or "").strip() or AUTO_REPORT_DIR
 
 
 @dataclass
 class AppPreferences:
     """프로그램 환경 설정"""
     ext: ExtensometerSettings = field(default_factory=ExtensometerSettings)
+    save: SaveSettings = field(default_factory=SaveSettings)
 
     def to_dict(self) -> dict:
         return {
             "version": PREFERENCES_VERSION,
             "extensometer": asdict(self.ext),
+            "save": asdict(self.save),
         }
 
     @classmethod
@@ -35,6 +50,9 @@ class AppPreferences:
         section = raw.get("extensometer")
         if isinstance(section, dict):
             prefs.ext = _build_extensometer(section)
+        save_sec = raw.get("save")
+        if isinstance(save_sec, dict):
+            prefs.save = _build_save(save_sec)
         return prefs
 
 
@@ -61,6 +79,19 @@ def _as_bool(value: Any, default: bool) -> bool:
     if isinstance(value, (int, float)):
         return bool(value)
     return default
+
+
+def _build_save(raw: dict) -> SaveSettings:
+    d = SaveSettings()
+    rule = str(raw.get("folder_rule", d.folder_rule)).strip().lower()
+    if rule not in FOLDER_RULES:
+        rule = d.folder_rule
+    return SaveSettings(
+        base_dir=str(raw.get("base_dir", d.base_dir) or "").strip(),
+        folder_rule=rule,
+        ask_after_test=_as_bool(raw.get("ask_after_test"), d.ask_after_test),
+        last_dir=str(raw.get("last_dir", d.last_dir) or "").strip(),
+    )
 
 
 def _build_extensometer(raw: dict) -> ExtensometerSettings:

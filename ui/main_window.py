@@ -55,7 +55,7 @@ from core.simulator import VirtualUTMSimulator
 from core.serial_driver import SerialUTMDriver
 from core.hardware_interface import HardwareInterface
 from core.calculator import MaterialCalculator
-from core.preferences import PreferencesManager
+from core.preferences import PreferencesManager, SaveSettings
 from core.pid_controller import (
     ControlMode, PIDProfileManager, evaluate_tracking
 )
@@ -64,11 +64,11 @@ from core.session import BATCH_METRICS, SpecimenSession
 from core.history import TestHistoryStore
 from core.sequence import SequenceProgram, StepAction
 from core.command_assistant import CommandAssistant, TestCommandPlan, material_label
-from core.auto_export import AUTO_REPORT_DIR, display_path, export_auto_reports
+from core.auto_export import AUTO_REPORT_DIR, FOLDER_RULES, display_path, export_auto_reports, resolve_report_dir
 from exporters.excel_exporter import ExcelExporter
 from exporters.pdf_exporter import PDFExporter
 from ui.styles import HYUNDAI_THEME_QSS
-from ui.dialogs import SequenceDialog, HistoryDialog, mode_display
+from ui.dialogs import SequenceDialog, HistoryDialog, PostTestSaveDialog, mode_display
 from ui.assistant_panel import TestAssistantPanel
 
 
@@ -116,8 +116,8 @@ class MainWindow(QMainWindow):
         self._last_tracking: str = ""
         self.simulator = VirtualUTMSimulator()
         self.serial_driver = SerialUTMDriver()
-        # 빠른 시험 어시스턴트가 자동 저장하는 폴더 (시험 완료 시 Excel + PDF)
-        self.auto_report_dir = AUTO_REPORT_DIR
+        # 빠른 시험 어시스턴트 · 시험 후 저장 기본 폴더
+        self.auto_report_dir = self.prefs.data.save.effective_base_dir()
         self._assistant_auto_export = False
         self._active_specimen: Optional[Specimen] = None
         # PID 게인은 한 곳에서 관리한다 (화면에서 저장하면 가상·실장비 모두 반영)
@@ -380,6 +380,7 @@ class MainWindow(QMainWindow):
         outer.addWidget(self._create_assistant_bar())
         self.assistant_panel = TestAssistantPanel(self.current_lang)
         self.assistant_panel.start_requested.connect(self._assistant_start)
+        self.assistant_panel.change_dir_requested.connect(self._on_assistant_change_dir)
         self.assistant_panel.cancel_requested.connect(self._assistant_cancel)
         outer.addWidget(self.assistant_panel)
 
@@ -539,6 +540,24 @@ class MainWindow(QMainWindow):
         # 하중 유지 선택이 시험 종류 라디오를 바꿔 놓았을 수 있으므로 다시 맞춘다
         radios.get(plan.mode, self.rb_tensile).setChecked(True)
 
+    def _preferred_save_base_dir(self) -> str:
+        save = self.prefs.data.save
+        return str(save.last_dir or "").strip() or save.effective_base_dir()
+
+    def _on_assistant_change_dir(self):
+        t = TRANSLATIONS[self.current_lang]
+        current = self._preferred_save_base_dir()
+        chosen = QFileDialog.getExistingDirectory(self, t["pref_save_browse"], current)
+        if not chosen:
+            return
+        self.prefs.data.save.base_dir = chosen
+        self.prefs.data.save.last_dir = chosen
+        self.prefs.save()
+        self.auto_report_dir = chosen
+        self.assistant_panel.set_save_dir(display_path(chosen))
+        if hasattr(self, "edit_save_dir"):
+            self.edit_save_dir.setText(chosen)
+
     def _finish_assistant_export(self, specimen: Specimen, config: TestConfig) -> tuple:
         """시험 완료 후 로우데이터(Excel) · 성적서(PDF) 자동 저장"""
         paths: dict = {}
@@ -546,7 +565,8 @@ class MainWindow(QMainWindow):
         try:
             paths = export_auto_reports(
                 specimen, config, self.current_result, self.data_points,
-                lang=self.current_lang, out_dir=self.auto_report_dir)
+                lang=self.current_lang, out_dir=self.auto_report_dir,
+                folder_rule=self.prefs.data.save.folder_rule)
         except Exception as exc:  # 저장 실패가 시험 결과 표시를 막지 않는다
             error = str(exc)
             print(f"[MainWindow] 자동 저장 실패: {exc}")
@@ -1575,6 +1595,43 @@ class MainWindow(QMainWindow):
             live_layout.addWidget(value, row, 1)
         live_layout.setColumnStretch(1, 1)
         right_col.addWidget(self.pref_live_group)
+
+        # 저장 폴더 설정
+        self.pref_save_group = QGroupBox("데이터 · 성적서 저장 폴더 설정")
+        self.pref_save_group.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Maximum)
+        save_grid = QGridLayout(self.pref_save_group)
+        save_grid.setContentsMargins(16, 18, 16, 14)
+        save_grid.setHorizontalSpacing(10)
+        save_grid.setVerticalSpacing(8)
+
+        self.lbl_pref_save_dir = QLabel("기본 저장 폴더:")
+        self.edit_save_dir = QLineEdit()
+        self.edit_save_dir.textChanged.connect(self._on_save_pref_changed)
+        self.btn_save_browse = QPushButton("폴더 선택...")
+        self.btn_save_browse.clicked.connect(self._browse_pref_save_dir)
+        save_grid.addWidget(self.lbl_pref_save_dir, 0, 0)
+        save_grid.addWidget(self.edit_save_dir, 0, 1)
+        save_grid.addWidget(self.btn_save_browse, 0, 2)
+
+        self.lbl_pref_save_rule = QLabel("폴더 분류 방식:")
+        self.combo_save_rule = QComboBox()
+        for rule in FOLDER_RULES:
+            self.combo_save_rule.addItem(rule, rule)
+        self.combo_save_rule.currentIndexChanged.connect(self._on_save_pref_changed)
+        save_grid.addWidget(self.lbl_pref_save_rule, 1, 0)
+        save_grid.addWidget(self.combo_save_rule, 1, 1, 1, 2)
+
+        self.chk_save_ask_after = QCheckBox("시험 완료 후 저장할 폴더 선택 창 띄우기")
+        self.chk_save_ask_after.toggled.connect(self._on_save_pref_changed)
+        save_grid.addWidget(self.chk_save_ask_after, 2, 0, 1, 3)
+
+        self.lbl_save_preview = QLabel("")
+        self.lbl_save_preview.setWordWrap(True)
+        self.lbl_save_preview.setStyleSheet("color: #1D4ED8; font-size: 8.5pt; font-weight: 600; background: transparent;")
+        save_grid.addWidget(self.lbl_save_preview, 3, 0, 1, 3)
+        save_grid.setColumnStretch(1, 1)
+        right_col.addWidget(self.pref_save_group)
+
         right_col.addStretch()
 
         columns.addLayout(right_col, stretch=2)
@@ -1612,7 +1669,41 @@ class MainWindow(QMainWindow):
         self.spin_ext_zero.setValue(ext.zero_offset_mv)
         self.spin_ext_res.setValue(ext.resolution_mm_per_pulse)
         self.chk_ext_invert.setChecked(ext.direction_invert)
+
+        save = self.prefs.data.save
+        self.edit_save_dir.blockSignals(True)
+        self.edit_save_dir.setText(save.effective_base_dir())
+        self.edit_save_dir.blockSignals(False)
+        self.combo_save_rule.blockSignals(True)
+        ridx = self.combo_save_rule.findData(save.folder_rule)
+        if ridx >= 0:
+            self.combo_save_rule.setCurrentIndex(ridx)
+        self.combo_save_rule.blockSignals(False)
+        self.chk_save_ask_after.blockSignals(True)
+        self.chk_save_ask_after.setChecked(save.ask_after_test)
+        self.chk_save_ask_after.blockSignals(False)
+        self._update_save_preview()
         self._update_pref_dirty()
+
+    def _browse_pref_save_dir(self):
+        t = TRANSLATIONS[self.current_lang]
+        current = self.edit_save_dir.text().strip() or self.prefs.data.save.effective_base_dir()
+        chosen = QFileDialog.getExistingDirectory(self, t["pref_save_browse"], current)
+        if chosen:
+            self.edit_save_dir.setText(chosen)
+
+    def _on_save_pref_changed(self):
+        self._update_save_preview()
+        self._update_pref_dirty()
+
+    def _update_save_preview(self):
+        t = TRANSLATIONS[self.current_lang]
+        base = self.edit_save_dir.text().strip() or AUTO_REPORT_DIR
+        rule = self.combo_save_rule.currentData() or "date"
+        dummy_spec = Specimen(specimen_id=self.edit_specimen_id.text().strip() or "SALT-SP-001")
+        dummy_cfg = self._get_current_config() if hasattr(self, "rb_tensile") else TestConfig()
+        example = resolve_report_dir(base, dummy_cfg, dummy_spec, folder_rule=rule, lang=self.current_lang)
+        self.lbl_save_preview.setText(t["pref_save_preview"].format(path=example))
 
     def _ext_settings_from_widgets(self) -> ExtensometerSettings:
         """화면 위젯 값으로 신율계 설정 구성"""
@@ -1676,7 +1767,16 @@ class MainWindow(QMainWindow):
     def _update_pref_dirty(self):
         """저장값과 화면값 차이 안내"""
         t = TRANSLATIONS[self.current_lang]
-        dirty = (self._ext_settings_from_widgets() != self.prefs.ext)
+        save = self.prefs.data.save
+        save_dir = self.edit_save_dir.text().strip() if hasattr(self, "edit_save_dir") else save.effective_base_dir()
+        save_rule = self.combo_save_rule.currentData() if hasattr(self, "combo_save_rule") else save.folder_rule
+        ask_after = self.chk_save_ask_after.isChecked() if hasattr(self, "chk_save_ask_after") else save.ask_after_test
+        save_dirty = (
+            save_dir != save.effective_base_dir()
+            or (save_rule or "date") != save.folder_rule
+            or ask_after != save.ask_after_test
+        )
+        dirty = (self._ext_settings_from_widgets() != self.prefs.ext) or save_dirty
         self.lbl_pref_dirty.setText(t["pref_unapplied"] if dirty else "")
         self.lbl_pref_dirty.setVisible(dirty)
 
@@ -1768,6 +1868,16 @@ class MainWindow(QMainWindow):
         self.lbl_live_raw_title.setText(t["pref_live_raw"])
         self.lbl_live_disp_title.setText(t["pref_live_disp"])
         self.lbl_live_strain_title.setText(t["pref_live_strain"])
+        self.pref_save_group.setTitle(t["pref_save_group"])
+        self.lbl_pref_save_dir.setText(t["pref_save_dir"])
+        self.btn_save_browse.setText(t["pref_save_browse"])
+        self.lbl_pref_save_rule.setText(t["pref_save_rule"])
+        self.combo_save_rule.blockSignals(True)
+        for i, rule in enumerate(FOLDER_RULES):
+            self.combo_save_rule.setItemText(i, t[f"save_rule_{rule}"])
+        self.combo_save_rule.blockSignals(False)
+        self.chk_save_ask_after.setText(t["pref_save_ask_after"])
+        self._update_save_preview()
         self._update_pref_hint()
         self._update_pref_dirty()
         self._refresh_pref_state()
@@ -1797,6 +1907,14 @@ class MainWindow(QMainWindow):
         t = TRANSLATIONS[self.current_lang]
         settings = self._ext_settings_from_widgets()
         self.prefs.data.ext = settings
+        save_dir = self.edit_save_dir.text().strip()
+        self.prefs.data.save = SaveSettings(
+            base_dir="" if save_dir == AUTO_REPORT_DIR else save_dir,
+            folder_rule=self.combo_save_rule.currentData() or "date",
+            ask_after_test=self.chk_save_ask_after.isChecked(),
+            last_dir=save_dir or self.prefs.data.save.last_dir,
+        )
+        self.auto_report_dir = self.prefs.data.save.effective_base_dir()
         ok = self.prefs.save()
         if not ok:
             if silent:
@@ -1829,6 +1947,8 @@ class MainWindow(QMainWindow):
                 return False
 
         self.prefs.data.ext = ExtensometerSettings()
+        self.prefs.data.save = SaveSettings()
+        self.auto_report_dir = self.prefs.data.save.effective_base_dir()
         self._sync_pref_widgets_from_model()
         self._apply_pref_group_state()
         ok = self._save_preferences(silent=True)
@@ -2155,28 +2275,14 @@ class MainWindow(QMainWindow):
         msg = t["status_done"].format(reason=reason, count=len(self.data_points))
         self.statusBar().showMessage(msg)
 
-        # 3) 어시스턴트로 시작한 시험이면 로우데이터(Excel) · 성적서(PDF) 자동 저장
+        # 3) 저장 처리: 시험 후 저장 폴더 선택 창 또는 자동 저장
         export_paths: dict = {}
         export_error = ""
-        if self._assistant_auto_export:
-            export_paths, export_error = self._finish_assistant_export(specimen, config)
-            self._assistant_auto_export = False
-        elif getattr(self, "assistant_panel", None) is not None \
-                and self.assistant_panel.state == "running":
-            # 자동 저장을 끄고 시작한 경우에도 카드는 완료 상태로 닫는다
-            self.assistant_panel.mark_completed({}, self.current_result.peak_load_n,
-                                                self.current_result.peak_stress_mpa,
-                                                specimen.specimen_id)
+        assistant_was_auto = self._assistant_auto_export
+        self._assistant_auto_export = False
+        ask_after = self.prefs.data.save.ask_after_test
 
-        # 4) 시편 번호 자동 증가 (배치 연속 시험)
-        if self.chk_auto_id.isChecked():
-            self._next_specimen_id()
-
-        integrity_note = "-"
-        if summary is not None:
-            integrity_note = t["history_integrity_ok"]
-        else:
-            integrity_note = t["hist_save_failed"]
+        integrity_note = t["history_integrity_ok"] if summary is not None else t["hist_save_failed"]
 
         lines = [
             f"상태: {reason}",
@@ -2187,14 +2293,63 @@ class MainWindow(QMainWindow):
         ]
         if self.current_result.sequence_steps:
             lines.append(f"시퀀스: {self.current_result.sequence_name or '-'}")
-        if export_paths:
-            lines.append(f"로우데이터(Excel): {os.path.normpath(export_paths.get('excel', ''))}")
-            lines.append(f"성적서(PDF): {os.path.normpath(export_paths.get('pdf', ''))}")
-        elif export_error:
-            lines.append(f"자동 저장 실패: {export_error}")
         if self._last_tracking:
             lines.append(self._last_tracking)
-        QMessageBox.information(self, "시험 완료", "시험이 완료되었습니다.\n" + "\n".join(lines))
+
+        if assistant_was_auto and not ask_after:
+            export_paths, export_error = self._finish_assistant_export(specimen, config)
+            if export_paths:
+                lines.append(f"로우데이터(Excel): {os.path.normpath(export_paths.get('excel', ''))}")
+                lines.append(f"성적서(PDF): {os.path.normpath(export_paths.get('pdf', ''))}")
+            elif export_error:
+                lines.append(f"자동 저장 실패: {export_error}")
+            QMessageBox.information(self, "시험 완료", "시험이 완료되었습니다.\n" + "\n".join(lines))
+        else:
+            dlg = PostTestSaveDialog(
+                summary_lines=lines,
+                specimen=specimen,
+                config=config,
+                base_dir=self._preferred_save_base_dir(),
+                folder_rule=self.prefs.data.save.folder_rule,
+                lang=self.current_lang,
+                parent=self,
+            )
+            if dlg.exec() == dlg.DialogCode.Accepted:
+                try:
+                    export_paths = export_auto_reports(
+                        specimen, config, self.current_result, self.data_points,
+                        lang=self.current_lang,
+                        out_dir=dlg.selected_base_dir,
+                        folder_rule=dlg.selected_rule,
+                        export_excel=dlg.want_excel,
+                        export_pdf=dlg.want_pdf,
+                    )
+                    self.prefs.data.save.last_dir = dlg.selected_base_dir
+                    self.prefs.data.save.folder_rule = dlg.selected_rule
+                    self.prefs.save()
+                except Exception as exc:
+                    export_error = str(exc)
+                    QMessageBox.warning(self, t["post_title"], t["post_save_fail"].format(error=export_error))
+
+                if export_paths:
+                    saved_msg = [t["post_saved_ok"]]
+                    if "excel" in export_paths:
+                        saved_msg.append(f"Excel: {os.path.normpath(export_paths['excel'])}")
+                    if "pdf" in export_paths:
+                        saved_msg.append(f"PDF: {os.path.normpath(export_paths['pdf'])}")
+                    QMessageBox.information(self, t["post_title"], "\n".join(saved_msg))
+
+            if getattr(self, "assistant_panel", None) is not None \
+                    and self.assistant_panel.state == "running":
+                if export_error:
+                    self.assistant_panel.mark_export_failed(export_error)
+                else:
+                    self.assistant_panel.mark_completed(
+                        export_paths, self.current_result.peak_load_n,
+                        self.current_result.peak_stress_mpa, specimen.specimen_id)
+
+        if self.chk_auto_id.isChecked():
+            self._next_specimen_id()
 
     def _tracking_summary(self, config: TestConfig, specimen: Specimen) -> str:
         """하중·응력 속도 제어 시험의 추종 오차 · 오버슈트 요약 문장"""
@@ -2585,7 +2740,13 @@ class MainWindow(QMainWindow):
             return
         specimen = self._get_current_specimen()
         config = self._get_current_config()
-        default_filename = f"UTM_{specimen.specimen_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        default_dir = resolve_report_dir(
+            self._preferred_save_base_dir(), config, specimen,
+            folder_rule=self.prefs.data.save.folder_rule, lang=self.current_lang)
+        os.makedirs(default_dir, exist_ok=True)
+        default_filename = os.path.join(
+            default_dir, f"UTM_{specimen.specimen_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        )
         filepath, _ = QFileDialog.getSaveFileName(self, "엑셀 시험 데이터 저장", default_filename, "Excel Files (*.xlsx)")
         if filepath:
             ExcelExporter.export(filepath, specimen, config, self.current_result, self.data_points)
@@ -2597,7 +2758,13 @@ class MainWindow(QMainWindow):
             return
         specimen = self._get_current_specimen()
         config = self._get_current_config()
-        default_filename = f"Cert_{specimen.specimen_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        default_dir = resolve_report_dir(
+            self._preferred_save_base_dir(), config, specimen,
+            folder_rule=self.prefs.data.save.folder_rule, lang=self.current_lang)
+        os.makedirs(default_dir, exist_ok=True)
+        default_filename = os.path.join(
+            default_dir, f"Cert_{specimen.specimen_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+        )
         filepath, _ = QFileDialog.getSaveFileName(self, "성적서 PDF 저장", default_filename, "PDF Files (*.pdf)")
         if filepath:
             PDFExporter.export(filepath, specimen, config, self.current_result, self.data_points)
